@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useDialog, useMessage, type UploadFileInfo } from 'naive-ui'
 import {
+  ArrowBack,
   CameraOutline,
   CreateOutline,
   EyeOffOutline,
@@ -13,10 +14,12 @@ import {
   TrashOutline,
 } from '@vicons/ionicons5'
 import { myArticleApi } from '@/api/myArticle'
+import { ARTICLE_STATUS, getArticleStatusLabel } from '@/constants/articleStatus'
 import { userApi } from '@/api/user'
 import MainLayout from '@/layouts/MainLayout.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { Article } from '@/types/article'
+import { formatArticleDateTime } from '@/utils/format'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -36,6 +39,10 @@ const profileTabs = [
   { key: 'favorited', label: '我收藏的' },
   { key: 'commented', label: '我评论的' },
 ] satisfies Array<{ key: ProfileTabKey; label: string }>
+
+function goBack() {
+  router.back()
+}
 
 /* ---- 退出登录 ---- */
 function handleLogout() {
@@ -58,22 +65,6 @@ const articleLoading = ref(false)
 const currentPage = ref(1)
 const pageSize = 2
 const total = ref(0)
-
-function formatDate(value: string) {
-  if (!value) return ''
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(value))
-}
-
-function statusLabel(status: number) {
-  if (status === 0) return '草稿'
-  return status === 1 ? '已发布' : '已隐藏'
-}
 
 async function loadArticles() {
   articleLoading.value = true
@@ -98,7 +89,7 @@ function handleEdit(article: Article) {
 }
 
 function handleToggleHide(article: Article) {
-  const isHidden = article.status === 2
+  const isHidden = article.status === ARTICLE_STATUS.HIDDEN
   dialog.warning({
     title: isHidden ? '取消隐藏' : '隐藏文章',
     content: isHidden
@@ -110,10 +101,10 @@ function handleToggleHide(article: Article) {
       try {
         if (isHidden) {
           await myArticleApi.publish(article.id)
-          article.status = 1
+          article.status = ARTICLE_STATUS.PUBLISHED
         } else {
           await myArticleApi.hide(article.id)
-          article.status = 2
+          article.status = ARTICLE_STATUS.HIDDEN
         }
         message.success(isHidden ? '已公开' : '已隐藏')
       } catch {
@@ -196,6 +187,11 @@ onMounted(() => {
 
 <template>
   <MainLayout>
+    <button class="profile-back" type="button" @click="goBack">
+      <n-icon><ArrowBack /></n-icon>
+      <span>返回</span>
+    </button>
+
     <div class="profile-layout">
       <!-- 左侧：身份卡片 -->
       <aside class="profile-sidebar">
@@ -282,14 +278,14 @@ onMounted(() => {
                   <span
                     class="profile-article-status"
                     :class="{
-                      draft: article.status === 0,
-                      published: article.status === 1,
-                      hidden: article.status === 2,
+                      draft: article.status === ARTICLE_STATUS.DRAFT,
+                      published: article.status === ARTICLE_STATUS.PUBLISHED,
+                      hidden: article.status === ARTICLE_STATUS.HIDDEN,
                     }"
                   >
-                    {{ statusLabel(article.status) }}
+                    {{ getArticleStatusLabel(article.status) }}
                   </span>
-                  <span>{{ formatDate(article.updatedAt) }}</span>
+                  <span>{{ formatArticleDateTime(article.updatedAt) }}</span>
                   <span>{{ article.viewCount || 0 }} 次浏览</span>
                 </div>
                 <h3>{{ article.title }}</h3>
@@ -310,10 +306,10 @@ onMounted(() => {
                 </button>
                 <button class="pa-btn hide" type="button" @click="handleToggleHide(article)">
                   <n-icon size="16">
-                    <EyeOffOutline v-if="article.status === 1" />
+                    <EyeOffOutline v-if="article.status === ARTICLE_STATUS.PUBLISHED" />
                     <EyeOutline v-else />
                   </n-icon>
-                  <span>{{ article.status === 1 ? '隐藏' : '取消隐藏' }}</span>
+                  <span>{{ article.status === ARTICLE_STATUS.PUBLISHED ? '隐藏' : '取消隐藏' }}</span>
                 </button>
                 <button class="pa-btn delete" type="button" @click="handleDelete(article)">
                   <n-icon size="16"><TrashOutline /></n-icon>
@@ -367,13 +363,27 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.profile-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 14px 0 0 30px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #2f6f73;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .profile-layout {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
   gap: 32px;
   max-width: 1080px;
   margin: 0;
-  padding: 32px 20px 56px 30px;
+  padding: 20px 20px 56px 30px;
 }
 
 /* ---- 左侧 ---- */

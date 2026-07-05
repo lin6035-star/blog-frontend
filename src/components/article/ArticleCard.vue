@@ -1,22 +1,16 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { ChatbubbleOutline, Eye } from '@vicons/ionicons5'
 import type { Article } from '@/types/article'
+import { formatArticleDate } from '@/utils/format'
 
-defineProps<{
+const props = defineProps<{
   article: Article
 }>()
 
-function formatDate(value: string) {
-  if (!value) {
-    return '未发布'
-  }
-
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date(value))
-}
+const authorDisplayName = computed(() =>
+  props.article.authorName?.trim() || `#${props.article.authorId}`,
+)
 </script>
 
 <template>
@@ -24,8 +18,11 @@ function formatDate(value: string) {
     <router-link class="article-link" :to="`/articles/${article.id}`">
       <div class="article-main">
         <div class="article-meta">
-          <span>作者 #{{ article.authorId }}</span>
-          <span>{{ formatDate(article.publishedAt) }}</span>
+          <span>作者：{{ authorDisplayName }}</span>
+          <span>{{ formatArticleDate(article.publishedAt) }}</span>
+          <span v-if="article.categoryName" class="article-category-tag">
+            #{{ article.categoryName }}
+          </span>
         </div>
         <h2>{{ article.title }}</h2>
         <p>{{ article.summary || '这篇文章暂时没有摘要，点击查看完整内容。' }}</p>

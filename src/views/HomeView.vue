@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { articleApi } from '@/api/article'
 import { categoryApi } from '@/api/category'
@@ -11,7 +11,10 @@ import type { Category } from '@/types/category'
 import type { PageData } from '@/types/result'
 import type { ArticleSort } from '@/api/article'
 
+defineOptions({ name: 'HomeView' })
+
 const route = useRoute()
+const router = useRouter()
 const message = useMessage()
 const articles = ref<Article[]>([])
 const categories = ref<Category[]>([])
@@ -25,6 +28,7 @@ const pageSize = 10
 const totalArticles = ref(0)
 
 const searchKeyword = computed(() => (route.query.keyword as string) ?? '')
+const isHomeRoute = computed(() => route.name === 'home')
 
 const allCategory: Category = { id: 0, name: '综合', code: 'all', description: '全部内容' }
 
@@ -72,6 +76,14 @@ async function loadHomeData() {
   await loadArticles()
 }
 
+function resetHomeState() {
+  selectedCategoryId.value = allCategory.id
+  selectedSort.value = 'recommend'
+  currentPage.value = 1
+  articles.value = []
+  totalArticles.value = 0
+}
+
 function onPageChange(page: number) {
   currentPage.value = page
   loadArticles()
@@ -94,8 +106,28 @@ onMounted(loadHomeData)
 watch(
   () => route.query.keyword,
   () => {
+    if (!isHomeRoute.value || route.query.refresh) {
+      return
+    }
+
     currentPage.value = 1
     loadArticles()
+  },
+)
+
+watch(
+  () => route.query.refresh,
+  async () => {
+    if (!isHomeRoute.value || !route.query.refresh) {
+      return
+    }
+
+    resetHomeState()
+    await loadHomeData()
+    window.scrollTo({ top: 0, left: 0 })
+    const cleanQuery = { ...route.query }
+    delete cleanQuery.refresh
+    await router.replace({ path: '/', query: cleanQuery })
   },
 )
 </script>

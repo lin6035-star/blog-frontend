@@ -4,7 +4,9 @@ import { useRouter } from 'vue-router'
 import { useDialog, useMessage } from 'naive-ui'
 import { ArrowBack, CreateOutline, TrashOutline } from '@vicons/ionicons5'
 import { myArticleApi } from '@/api/myArticle'
+import { ARTICLE_STATUS } from '@/constants/articleStatus'
 import type { Article } from '@/types/article'
+import { formatArticleDateTime } from '@/utils/format'
 
 const router = useRouter()
 const message = useMessage()
@@ -21,7 +23,7 @@ const total = ref(0)
 async function loadDrafts() {
   loading.value = true
   try {
-    const res = await myArticleApi.getList(currentPage.value, pageSize, 0)
+    const res = await myArticleApi.getList(currentPage.value, pageSize, ARTICLE_STATUS.DRAFT)
     const data = res.data
     articles.value = data.list ?? []
     total.value = data.total ?? 0
@@ -79,18 +81,6 @@ function onPageChange(page: number) {
   loadDrafts()
 }
 
-/* ---- 日期格式化 ---- */
-function formatDate(value: string) {
-  if (!value) return ''
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(value))
-}
-
 onMounted(loadDrafts)
 </script>
 
@@ -136,7 +126,7 @@ onMounted(loadDrafts)
         <div class="draft-card-body">
           <div class="draft-meta">
             <span class="draft-badge">草稿</span>
-            <span>{{ formatDate(article.updatedAt) }}</span>
+            <span>{{ formatArticleDateTime(article.updatedAt) }}</span>
           </div>
           <h2>{{ article.title }}</h2>
           <p>{{ article.summary || '暂无摘要' }}</p>

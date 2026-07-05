@@ -25,4 +25,17 @@ describe('profile article tabs layout', () => {
     expect(profileView).toContain('max-width: 1080px')
     expect(profileView).toContain('grid-template-columns: 280px minmax(0, 1fr)')
   })
+
+  it('keeps the profile content close to the top header', () => {
+    expect(profileView).toContain('margin: 14px 0 0 30px')
+    expect(profileView).toContain('padding: 20px 20px 56px 30px')
+  })
+
+  it('uses a history back button instead of refreshing home', () => {
+    expect(profileView).toContain('function goBack()')
+    expect(profileView).toContain('router.back()')
+    expect(profileView).toContain('class="profile-back"')
+    expect(profileView).toContain('@click="goBack"')
+    expect(profileView).not.toContain('refresh: String(Date.now())')
+  })
 })

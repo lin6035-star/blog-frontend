@@ -10,12 +10,19 @@ import { useAuthStore } from '@/stores/auth'
 
 const router = createRouter({
   history: createWebHistory(),
+  scrollBehavior(_to, _from, savedPosition) {
+    if (savedPosition) {
+      return savedPosition
+    }
+
+    return { top: 0 }
+  },
   routes: [
     {
       path: '/',
       name: 'home',
       component: HomeView,
-      meta: { title: '首页' },
+      meta: { title: '首页', keepAlive: true },
     },
     {
       path: '/articles/:id',

@@ -543,6 +543,14 @@ textarea {
   margin-top: 14px;
 }
 
+.article-category-tag {
+  color: var(--color-forest);
+  background: var(--color-mint);
+  border-radius: 6px;
+  padding: 2px 7px;
+  font-weight: 700;
+}
+
 .article-stats span,
 .detail-meta span {
   display: inline-flex;
@@ -665,8 +673,13 @@ textarea {
   align-items: center;
   gap: 6px;
   margin-bottom: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--color-forest);
+  font: inherit;
   font-weight: 700;
+  cursor: pointer;
 }
 
 .detail-panel {

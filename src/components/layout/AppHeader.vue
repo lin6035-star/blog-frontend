@@ -28,20 +28,24 @@ function handleSearch() {
     router.push({ path: '/' })
   }
 }
+
+function goHomeFresh() {
+  router.push({ path: '/', query: { refresh: String(Date.now()) } })
+}
 </script>
 
 <template>
   <header class="app-header">
-    <router-link class="brand" to="/">
+    <a class="brand" href="/" @click.prevent="goHomeFresh">
       <span class="brand-mark">H</span>
       <span class="brand-text">海林Blog</span>
-    </router-link>
+    </a>
 
     <nav class="header-nav" aria-label="主导航">
-      <router-link to="/">
+      <a href="/" @click.prevent="goHomeFresh">
         <n-icon><Home /></n-icon>
         首页
-      </router-link>
+      </a>
       <router-link to="/editor">
         <n-icon><CreateOutline /></n-icon>
         写文章

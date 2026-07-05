@@ -7,6 +7,8 @@ import { MdEditor } from 'md-editor-v3'
 import 'md-editor-v3/lib/style.css'
 import { categoryApi } from '@/api/category'
 import { myArticleApi, type ArticleForm } from '@/api/myArticle'
+import { ARTICLE_STATUS, type ArticleStatus } from '@/constants/articleStatus'
+import { extractArticleSummary } from '@/utils/articleSummary'
 import type { Category } from '@/types/category'
 
 const router = useRouter()
@@ -19,6 +21,9 @@ const editId = computed(() => {
   const id = route.params.id
   return id ? Number(id) : null
 })
+const isEditingPublished = computed(
+  () => editId.value !== null && form.status === ARTICLE_STATUS.PUBLISHED,
+)
 
 /* ---- 表单 ---- */
 const form = reactive<ArticleForm>({
@@ -27,28 +32,27 @@ const form = reactive<ArticleForm>({
   summary: '',
   content: '',
   coverUrl: '',
-  status: 0,
+  status: ARTICLE_STATUS.DRAFT,
 })
 const initialContent = ref('')
 const initialTitle = ref('')
 const initialCoverUrl = ref('')
+const initialCategoryId = ref<number | null>(null)
 const saving = ref(false)
 
 /* ---- 分类 ---- */
+const DEFAULT_CATEGORY_CODE = 'notes'
+const DEFAULT_CATEGORY_NAME = '随笔'
 const categories = ref<Category[]>([])
 
-/* ---- 摘要自动截取 ---- */
-function extractSummary(content: string): string {
-  const plain = content
-    .replace(/#{1,6}\s/g, '')
-    .replace(/\*\*/g, '')
-    .replace(/[`*_~>]/g, '')
-    .replace(/!\[.*?\]\(.*?\)/g, '')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/\n+/g, ' ')
-    .trim()
-  const maxLen = 25
-  return plain.length > maxLen ? plain.slice(0, maxLen) + '…' : plain
+function resolveSubmitCategoryId() {
+  if (form.categoryId !== null) {
+    return form.categoryId
+  }
+
+  return categories.value.find((category) => category.code === DEFAULT_CATEGORY_CODE)?.id
+    ?? categories.value.find((category) => category.name === DEFAULT_CATEGORY_NAME)?.id
+    ?? null
 }
 
 /* ---- 封面上传 ---- */
@@ -82,10 +86,16 @@ const isDirty = computed(() => {
     return (
       form.title !== initialTitle.value ||
       form.content !== initialContent.value ||
-      form.coverUrl !== initialCoverUrl.value
+      form.coverUrl !== initialCoverUrl.value ||
+      form.categoryId !== initialCategoryId.value
     )
   }
-  return form.title.trim() !== '' || form.content !== '' || form.coverUrl !== ''
+  return (
+    form.title.trim() !== '' ||
+    form.content !== '' ||
+    form.coverUrl !== '' ||
+    form.categoryId !== null
+  )
 })
 
 /* ---- 图片上传 ---- */
@@ -102,66 +112,74 @@ async function handleUploadImg(files: File[], callback: (urls: string[]) => void
   callback(urls)
 }
 
-/* ---- 保存草稿 ---- */
-async function handleSaveDraft() {
+async function saveArticle(
+  status: ArticleStatus,
+  successText: string,
+  options: { navigateBack?: boolean; failureText?: string } = {},
+) {
   if (!form.title.trim()) {
     message.warning('请输入文章标题')
-    return
+    return false
   }
 
   saving.value = true
-  form.status = 0
-  form.summary = extractSummary(form.content)
+  form.status = status
+  form.summary = extractArticleSummary(form.content)
+  const submitForm: ArticleForm = {
+    ...form,
+    categoryId: resolveSubmitCategoryId(),
+  }
 
   try {
     if (editId.value) {
-      await myArticleApi.update(editId.value, form)
+      await myArticleApi.update(editId.value, submitForm)
     } else {
-      const res = await myArticleApi.create(form)
+      const res = await myArticleApi.create(submitForm)
       const id = res.data
       if (id) {
         skipGuard.value = true
         router.replace({ name: 'editor-edit', params: { id } })
       }
     }
-    message.success('已保存至草稿箱')
+    message.success(successText)
     initialContent.value = form.content
     initialTitle.value = form.title
     initialCoverUrl.value = form.coverUrl
+    initialCategoryId.value = form.categoryId
+    if (options.navigateBack) {
+      skipGuard.value = true
+      router.back()
+    }
+    return true
   } catch (e) {
-    const msg = e instanceof Error ? e.message : '保存失败'
+    const msg = e instanceof Error ? e.message : options.failureText ?? '保存失败'
     message.error(msg)
+    return false
   } finally {
     saving.value = false
   }
 }
 
+/* ---- 保存草稿 ---- */
+async function handleSaveDraft() {
+  if (isEditingPublished.value) {
+    message.warning('已发布文章不能保存为草稿')
+    return false
+  }
+
+  return await saveArticle(ARTICLE_STATUS.DRAFT, '已保存至草稿箱')
+}
+
+async function handleSavePublishedChange() {
+  return await saveArticle(ARTICLE_STATUS.PUBLISHED, '文章已更新')
+}
+
 /* ---- 发布 ---- */
 async function handlePublish() {
-  if (!form.title.trim()) {
-    message.warning('请输入文章标题')
-    return
-  }
-
-  saving.value = true
-  form.status = 1
-  form.summary = extractSummary(form.content)
-
-  try {
-    if (editId.value) {
-      await myArticleApi.update(editId.value, form)
-    } else {
-      await myArticleApi.create(form)
-    }
-    message.success('发布成功')
-    skipGuard.value = true
-    router.back()
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : '发布失败'
-    message.error(msg)
-  } finally {
-    saving.value = false
-  }
+  await saveArticle(ARTICLE_STATUS.PUBLISHED, isEditingPublished.value ? '文章已更新' : '发布成功', {
+    navigateBack: true,
+    failureText: isEditingPublished.value ? '保存失败' : '发布失败',
+  })
 }
 
 /* ---- 返回 ---- */
@@ -169,11 +187,11 @@ function handleBack() {
   router.back()
 }
 
-/* ---- 键盘快捷键 Ctrl+S 保存草稿 ---- */
+/* ---- 键盘快捷键 Ctrl+S 保存 ---- */
 function onKeydown(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && e.key === 's') {
     e.preventDefault()
-    handleSaveDraft()
+    isEditingPublished.value ? handleSavePublishedChange() : handleSaveDraft()
   }
 }
 
@@ -201,6 +219,7 @@ onMounted(async () => {
       initialContent.value = article.content
       initialTitle.value = article.title
       initialCoverUrl.value = article.coverUrl
+      initialCategoryId.value = article.categoryId
     } catch {
       message.error('文章加载失败')
       router.back()
@@ -222,15 +241,24 @@ onBeforeRouteLeave((_to, _from, next) => {
   if (isDirty.value) {
     dialog.warning({
       title: '离开确认',
-      content: '你还有未保存的内容，是否保存草稿后再离开？',
-      positiveText: '保存草稿',
-      negativeText: '不保存',
+      content: isEditingPublished.value
+        ? '你还有未保存的修改，是否保存并更新后再离开？'
+        : '你还有未保存的内容，是否保存草稿后再离开？',
+      positiveText: isEditingPublished.value ? '保存并更新文章' : '保存草稿',
+      negativeText: isEditingPublished.value ? '取消' : '不保存',
       onPositiveClick: async () => {
-        await handleSaveDraft()
-        next()
+        const saved = await (isEditingPublished.value ? handleSavePublishedChange() : handleSaveDraft())
+        if (saved) {
+          next()
+        } else {
+          next(false)
+        }
       },
       onNegativeClick: () => {
         next()
+      },
+      onClose: () => {
+        next(false)
       },
     })
   } else {
@@ -257,6 +285,7 @@ onBeforeRouteLeave((_to, _from, next) => {
 
       <div class="editor-actions">
         <button
+          v-if="!isEditingPublished"
           class="editor-btn editor-btn-draft"
           type="button"
           :disabled="saving"
@@ -270,7 +299,7 @@ onBeforeRouteLeave((_to, _from, next) => {
           :disabled="saving"
           @click="handlePublish"
         >
-          {{ saving ? '…' : '发布' }}
+          {{ saving ? '…' : isEditingPublished ? '更新文章' : '发布' }}
         </button>
       </div>
     </header>

@@ -60,6 +60,28 @@ describe('home information-flow layout', () => {
     expect(feed).not.toContain('<button type="button">前端</button>')
   })
 
+  it('shows article author nickname and category tag in the card meta row', () => {
+    const articleCard = readSource('components/article/ArticleCard.vue')
+    const articleType = readSource('types/article.ts')
+
+    expect(articleType).toContain('authorName?: string')
+    expect(articleType).toContain('categoryName?: string')
+    expect(articleCard).toContain('作者：{{ authorDisplayName }}')
+    expect(articleCard).toContain('class="article-category-tag"')
+    expect(articleCard).toContain('#{{ article.categoryName }}')
+    expect(articleCard).not.toContain('作者 #{{ article.authorId }}')
+  })
+
+  it('shows article author nickname and category tag in the detail meta row', () => {
+    const detail = readSource('views/ArticleDetailView.vue')
+
+    expect(detail).toContain('authorDisplayName')
+    expect(detail).toContain('作者：{{ authorDisplayName }}')
+    expect(detail).toContain('class="article-category-tag"')
+    expect(detail).toContain('#{{ article.categoryName }}')
+    expect(detail).not.toContain('作者 #{{ article.authorId }}')
+  })
+
   it('keeps avatar hover circular without the old red border ring', () => {
     const css = readSource('styles/index.css')
     const hoverStart = css.indexOf('.header-avatar-link:hover')
@@ -68,5 +90,51 @@ describe('home information-flow layout', () => {
     expect(css).toContain('.header-avatar-link:hover')
     expect(hoverBlock).toContain('scale(1.08)')
     expect(hoverBlock).not.toContain('border-color')
+  })
+
+  it('caches the home route and restores browser back scroll positions', () => {
+    const app = readSource('App.vue')
+    const router = readSource('router/index.ts')
+    const home = readSource('views/HomeView.vue')
+
+    expect(router).toContain('scrollBehavior')
+    expect(router).toContain('if (savedPosition)')
+    expect(router).toContain('meta: { title: \'首页\', keepAlive: true }')
+    expect(app).toContain('<router-view v-slot="{ Component }">')
+    expect(app).toContain('<KeepAlive include="HomeView">')
+    expect(app).toContain('<component :is="Component" />')
+    expect(home).toContain("defineOptions({ name: 'HomeView' })")
+  })
+
+  it('refreshes home state only when users actively click header home entries', () => {
+    const header = readSource('components/layout/AppHeader.vue')
+    const home = readSource('views/HomeView.vue')
+
+    expect(header).toContain('function goHomeFresh()')
+    expect(header).toContain("query: { refresh: String(Date.now()) }")
+    expect(header).toContain('@click.prevent="goHomeFresh"')
+    expect(home).toContain('const router = useRouter()')
+    expect(home).toContain('function resetHomeState()')
+    expect(home).toContain('route.query.refresh')
+    expect(home).toContain('resetHomeState()')
+    expect(home).toContain('router.replace')
+    expect(home).toContain('delete cleanQuery.refresh')
+  })
+
+  it('uses history back for the article detail return button', () => {
+    const detail = readSource('views/ArticleDetailView.vue')
+
+    expect(detail).toContain('const router = useRouter()')
+    expect(detail).toContain('function goBack()')
+    expect(detail).toContain('router.back()')
+    expect(detail).toContain('@click="goBack"')
+    expect(detail).not.toContain('class="back-link" to="/"')
+  })
+
+  it('does not show the article summary on the detail page', () => {
+    const detail = readSource('views/ArticleDetailView.vue')
+
+    expect(detail).not.toContain('{{ article.summary }}')
+    expect(detail).toContain('请返回首页查看其他公开文章。')
   })
 })
