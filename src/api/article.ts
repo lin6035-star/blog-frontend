@@ -5,6 +5,7 @@ import type { PageData } from '@/types/result'
 export interface ArticleListParams {
   page?: number
   pageSize?: number
+  keyword?: string
 }
 
 export const articleApi = {

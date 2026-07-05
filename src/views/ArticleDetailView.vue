@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { ArrowBack, Eye } from '@vicons/ionicons5'
+import { Marked } from 'marked'
 import { articleApi } from '@/api/article'
 import MainLayout from '@/layouts/MainLayout.vue'
 import type { Article } from '@/types/article'
@@ -11,6 +12,13 @@ const route = useRoute()
 const message = useMessage()
 const article = ref<Article | null>(null)
 const loading = ref(false)
+
+const marked = new Marked()
+
+const renderedContent = computed(() => {
+  if (!article.value?.content) return ''
+  return marked.parse(article.value.content) as string
+})
 
 function formatDate(value: string) {
   if (!value) {
@@ -61,15 +69,7 @@ onMounted(loadArticle)
             </span>
           </div>
           <p class="detail-summary">{{ article.summary }}</p>
-          <img
-            v-if="article.coverUrl"
-            class="detail-cover"
-            :src="article.coverUrl"
-            alt=""
-          />
-          <div class="article-content">
-            {{ article.content }}
-          </div>
+          <div class="article-content" v-html="renderedContent" />
         </template>
         <template v-else-if="!loading">
           <h1>文章不存在</h1>

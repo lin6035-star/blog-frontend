@@ -18,7 +18,17 @@ describe('articleApi', () => {
 
     articleApi.getList()
 
-    expect(getMock).toHaveBeenCalledWith('/articles')
+    expect(getMock).toHaveBeenCalledWith('/articles', { params: undefined })
+  })
+
+  it('passes pagination query params to public articles endpoint', async () => {
+    const { articleApi } = await import('./article')
+
+    articleApi.getList({ page: 2, pageSize: 10 })
+
+    expect(getMock).toHaveBeenCalledWith('/articles', {
+      params: { page: 2, pageSize: 10 },
+    })
   })
 
   it('requests public article detail without repeating the /api prefix', async () => {

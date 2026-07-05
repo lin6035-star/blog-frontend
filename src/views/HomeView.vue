@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { articleApi } from '@/api/article'
 import { categoryApi } from '@/api/category'
@@ -11,6 +12,7 @@ import type { Category } from '@/types/category'
 import type { PageData } from '@/types/result'
 import type { Tag } from '@/types/tag'
 
+const route = useRoute()
 const message = useMessage()
 const articles = ref<Article[]>([])
 const categories = ref<Category[]>([])
@@ -21,6 +23,8 @@ const loading = ref(false)
 const currentPage = ref(1)
 const pageSize = 10
 const totalArticles = ref(0)
+
+const searchKeyword = computed(() => (route.query.keyword as string) ?? '')
 
 const fallbackCategories: Category[] = [
   { id: 0, name: '综合', code: 'general', description: '全部内容' },
@@ -45,7 +49,11 @@ async function loadArticles() {
   loading.value = true
 
   try {
-    const result = await articleApi.getList({ page: currentPage.value, pageSize })
+    const result = await articleApi.getList({
+      page: currentPage.value,
+      pageSize,
+      keyword: searchKeyword.value || undefined,
+    })
     const data = result.data as PageData<Article>
     articles.value = data.list ?? []
     totalArticles.value = data.total ?? 0
@@ -78,6 +86,14 @@ function onPageChange(page: number) {
 }
 
 onMounted(loadHomeData)
+
+watch(
+  () => route.query.keyword,
+  () => {
+    currentPage.value = 1
+    loadArticles()
+  },
+)
 </script>
 
 <template>

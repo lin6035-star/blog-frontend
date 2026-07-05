@@ -6,6 +6,9 @@ export interface Article {
   summary: string
   content: string
   coverUrl: string
+  status: number
   viewCount: number
   publishedAt: string
+  createdAt: string
+  updatedAt: string
 }
