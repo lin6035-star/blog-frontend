@@ -17,21 +17,47 @@ describe('home information-flow layout', () => {
     expect(header).toContain('class="header-search"')
     expect(header).toContain('class="creator-center"')
     expect(header).toContain('class="creator-popover"')
-    expect(header).toContain('<button type="button">')
+    expect(header).toContain('class="creator-trigger" type="button"')
     expect(header).not.toContain('to="/write"')
     expect(header).not.toContain('to="/drafts"')
     expect(header).not.toContain("router.push('/login')")
     expect(header).not.toContain("router.push('/register')")
   })
 
-  it('moves categories to the left rail and tags to the centered top strip', () => {
+  it('keeps categories in the left rail without showing the home tag strip', () => {
     const home = readSource('views/HomeView.vue')
 
     expect(home).not.toContain('RightSidebar')
     expect(home).not.toContain('home-hero')
-    expect(home).toContain('class="tag-strip"')
+    expect(home).not.toContain('class="tag-strip"')
     expect(home).toContain('class="category-rail"')
-    expect(home).toContain('class="feed-layout"')
+    expect(home).toContain('class="feed-layout home-feed-layout"')
+  })
+
+  it('selects a category from the left rail and passes categoryId when loading articles', () => {
+    const home = readSource('views/HomeView.vue')
+
+    expect(home).toContain('selectedCategoryId')
+    expect(home).toContain('function onCategorySelect(category: Category)')
+    expect(home).toContain('categoryId:')
+    expect(home).toContain('@click="onCategorySelect(category)"')
+    expect(home).toContain(':class="{ active: category.id === selectedCategoryId }"')
+  })
+
+  it('uses the top feed tabs as recommend/latest sort controls', () => {
+    const home = readSource('views/HomeView.vue')
+    const feed = readSource('components/article/ArticleFeed.vue')
+
+    expect(home).toContain("selectedSort = ref<ArticleSort>('recommend')")
+    expect(home).toContain('sort: selectedSort.value')
+    expect(home).toContain('function onSortChange(sort: ArticleSort)')
+    expect(home).toContain(':sort="selectedSort"')
+    expect(home).toContain('@sort-change="onSortChange"')
+    expect(feed).toContain("sortTabs")
+    expect(feed).toContain("value: 'recommend'")
+    expect(feed).toContain("value: 'latest'")
+    expect(feed).not.toContain('<button type="button">后端</button>')
+    expect(feed).not.toContain('<button type="button">前端</button>')
   })
 
   it('keeps avatar hover circular without the old red border ring', () => {

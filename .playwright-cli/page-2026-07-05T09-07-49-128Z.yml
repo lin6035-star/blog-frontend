@@ -1,0 +1,127 @@
+- generic [ref=f1e3]:
+  - banner [ref=f1e4]:
+    - link "H 海林Blog" [ref=f1e5] [cursor=pointer]:
+      - /url: /
+      - generic [ref=f1e6]: H
+      - generic [ref=f1e7]: 海林Blog
+    - navigation "主导航" [ref=f1e8]:
+      - link "首页" [ref=f1e9] [cursor=pointer]:
+        - /url: /
+        - img [ref=f1e10]:
+          - img [ref=f1e11]
+        - text: 首页
+      - link "写文章" [ref=f1e14] [cursor=pointer]:
+        - /url: /editor
+        - img [ref=f1e15]:
+          - img [ref=f1e16]
+        - text: 写文章
+    - generic [ref=f1e20]:
+      - generic "搜索文章" [ref=f1e21]:
+        - searchbox "搜索文章" [ref=f1e22]
+        - img [ref=f1e23] [cursor=pointer]:
+          - img [ref=f1e24]
+      - button "创作中心" [ref=f1e28] [cursor=pointer]:
+        - text: 创作中心
+        - img [ref=f1e29]:
+          - img [ref=f1e30]
+      - link "登录" [ref=f1e32] [cursor=pointer]:
+        - /url: /login
+      - link "注册" [ref=f1e33] [cursor=pointer]:
+        - /url: /register
+  - main [ref=f1e34]:
+    - generic [ref=f1e35]:
+      - complementary "分类导航" [ref=f1e36]:
+        - button "综 综合" [ref=f1e37] [cursor=pointer]:
+          - generic [ref=f1e38]: 综
+          - generic [ref=f1e39]: 综合
+        - button "A AI / Agent" [active] [ref=f1e40] [cursor=pointer]:
+          - generic [ref=f1e41]: A
+          - generic [ref=f1e42]: AI / Agent
+        - button "J Java 后端" [ref=f1e43] [cursor=pointer]:
+          - generic [ref=f1e44]: J
+          - generic [ref=f1e45]: Java 后端
+        - button "项 项目实战" [ref=f1e46] [cursor=pointer]:
+          - generic [ref=f1e47]: 项
+          - generic [ref=f1e48]: 项目实战
+        - button "随 随笔" [ref=f1e49] [cursor=pointer]:
+          - generic [ref=f1e50]: 随
+          - generic [ref=f1e51]: 随笔
+      - generic [ref=f1e52]:
+        - generic [ref=f1e53]:
+          - button "推荐" [ref=f1e54] [cursor=pointer]
+          - button "最新" [ref=f1e55] [cursor=pointer]
+          - button "后端" [ref=f1e56] [cursor=pointer]
+          - button "前端" [ref=f1e57] [cursor=pointer]
+        - generic [ref=f1e131]:
+          - article [ref=f1e132]:
+            - 'link "作者 #2 2026/07/05 干扰司法是 色粉色粉 2 讨论" [ref=f1e133] [cursor=pointer]':
+              - /url: /articles/14
+              - generic [ref=f1e134]:
+                - generic [ref=f1e135]:
+                  - generic [ref=f1e136]: "作者 #2"
+                  - generic [ref=f1e137]: 2026/07/05
+                - heading "干扰司法是" [level=2] [ref=f1e138]
+                - paragraph [ref=f1e139]: 色粉色粉
+                - generic [ref=f1e140]:
+                  - generic [ref=f1e141]:
+                    - img [ref=f1e142]:
+                      - img [ref=f1e143]
+                    - text: "2"
+                  - generic [ref=f1e146]:
+                    - img [ref=f1e147]:
+                      - img [ref=f1e148]
+                    - text: 讨论
+          - article [ref=f1e150]:
+            - 'link "作者 #2 2026/07/05 这是我的第一个海林Blog 测试博文，加油！加油！ <ufighting！</… 8 讨论" [ref=f1e151] [cursor=pointer]':
+              - /url: /articles/5
+              - generic [ref=f1e152]:
+                - generic [ref=f1e153]:
+                  - generic [ref=f1e154]: "作者 #2"
+                  - generic [ref=f1e155]: 2026/07/05
+                - heading "这是我的第一个海林Blog" [level=2] [ref=f1e156]
+                - paragraph [ref=f1e157]: 测试博文，加油！加油！ <ufighting！</…
+                - generic [ref=f1e158]:
+                  - generic [ref=f1e159]:
+                    - img [ref=f1e160]:
+                      - img [ref=f1e161]
+                    - text: "8"
+                  - generic [ref=f1e164]:
+                    - img [ref=f1e165]:
+                      - img [ref=f1e166]
+                    - text: 讨论
+          - article [ref=f1e168]:
+            - 'link "作者 #2 2026/07/05 欢迎来到海林Blog 这是我的第一个独立开发的前后端项目，多多包涵！ 2 讨论" [ref=f1e169] [cursor=pointer]':
+              - /url: /articles/2
+              - generic [ref=f1e170]:
+                - generic [ref=f1e171]:
+                  - generic [ref=f1e172]: "作者 #2"
+                  - generic [ref=f1e173]: 2026/07/05
+                - heading "欢迎来到海林Blog" [level=2] [ref=f1e174]
+                - paragraph [ref=f1e175]: 这是我的第一个独立开发的前后端项目，多多包涵！
+                - generic [ref=f1e176]:
+                  - generic [ref=f1e177]:
+                    - img [ref=f1e178]:
+                      - img [ref=f1e179]
+                    - text: "2"
+                  - generic [ref=f1e182]:
+                    - img [ref=f1e183]:
+                      - img [ref=f1e184]
+                    - text: 讨论
+          - article [ref=f1e186]:
+            - 'link "作者 #1 2026/07/01 我的第一篇博客文章 这是海林博客系统的第一篇示例文章。 2 讨论" [ref=f1e187] [cursor=pointer]':
+              - /url: /articles/1
+              - generic [ref=f1e188]:
+                - generic [ref=f1e189]:
+                  - generic [ref=f1e190]: "作者 #1"
+                  - generic [ref=f1e191]: 2026/07/01
+                - heading "我的第一篇博客文章" [level=2] [ref=f1e192]
+                - paragraph [ref=f1e193]: 这是海林博客系统的第一篇示例文章。
+                - generic [ref=f1e194]:
+                  - generic [ref=f1e195]:
+                    - img [ref=f1e196]:
+                      - img [ref=f1e197]
+                    - text: "2"
+                  - generic [ref=f1e200]:
+                    - img [ref=f1e201]:
+                      - img [ref=f1e202]
+                    - text: 讨论

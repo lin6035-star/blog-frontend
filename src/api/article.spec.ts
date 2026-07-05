@@ -31,6 +31,26 @@ describe('articleApi', () => {
     })
   })
 
+  it('passes category query params to public articles endpoint', async () => {
+    const { articleApi } = await import('./article')
+
+    articleApi.getList({ page: 1, pageSize: 10, categoryId: 2 })
+
+    expect(getMock).toHaveBeenCalledWith('/articles', {
+      params: { page: 1, pageSize: 10, categoryId: 2 },
+    })
+  })
+
+  it('passes sort query params to public articles endpoint', async () => {
+    const { articleApi } = await import('./article')
+
+    articleApi.getList({ page: 1, pageSize: 10, categoryId: 2, sort: 'recommend' })
+
+    expect(getMock).toHaveBeenCalledWith('/articles', {
+      params: { page: 1, pageSize: 10, categoryId: 2, sort: 'recommend' },
+    })
+  })
+
   it('requests public article detail without repeating the /api prefix', async () => {
     const { articleApi } = await import('./article')
 

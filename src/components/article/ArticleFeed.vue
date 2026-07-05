@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import ArticleCard from '@/components/article/ArticleCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
+import type { ArticleSort } from '@/api/article'
 import type { Article } from '@/types/article'
 
 defineProps<{
@@ -9,20 +10,32 @@ defineProps<{
   page: number
   pageSize: number
   total: number
+  sort: ArticleSort
 }>()
 
 const emit = defineEmits<{
   'page-change': [page: number]
+  'sort-change': [sort: ArticleSort]
 }>()
+
+const sortTabs: Array<{ label: string; value: ArticleSort }> = [
+  { label: '推荐', value: 'recommend' },
+  { label: '最新', value: 'latest' },
+]
 </script>
 
 <template>
   <section class="feed-panel">
     <div class="feed-tabs">
-      <button class="active" type="button">推荐</button>
-      <button type="button">最新</button>
-      <button type="button">后端</button>
-      <button type="button">前端</button>
+      <button
+        v-for="tab in sortTabs"
+        :key="tab.value"
+        :class="{ active: tab.value === sort }"
+        type="button"
+        @click="emit('sort-change', tab.value)"
+      >
+        {{ tab.label }}
+      </button>
     </div>
 
     <div v-if="loading" class="article-list">

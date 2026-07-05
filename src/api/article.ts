@@ -6,7 +6,11 @@ export interface ArticleListParams {
   page?: number
   pageSize?: number
   keyword?: string
+  categoryId?: number
+  sort?: ArticleSort
 }
+
+export type ArticleSort = 'recommend' | 'latest'
 
 export const articleApi = {
   getList(params?: ArticleListParams) {

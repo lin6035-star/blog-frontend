@@ -92,27 +92,27 @@ async function submit(e: Event) {
     // 触发成功动画
     loginSuccess.value = true
 
-    // 1s 后彩色飞溅
-    setTimeout(() => {
-      const vw = window.innerWidth
-      const vh = window.innerHeight
-      const size = Math.max(vw, vh) * 3
-      splashes.value = [
-        { x: vw * 0.15, y: vh * 0.35, size, color: '#A7F3D0' },
-        { x: vw * 0.5, y: vh * 0.6, size, color: '#C4B5FD' },
-        { x: vw * 0.8, y: vh * 0.3, size, color: '#FECDD3' },
-      ]
-    }, 1000)
+    // // 1s 后彩色飞溅（暂时关闭）
+    // setTimeout(() => {
+    //   const vw = window.innerWidth
+    //   const vh = window.innerHeight
+    //   const size = Math.max(vw, vh) * 3
+    //   splashes.value = [
+    //     { x: vw * 0.15, y: vh * 0.35, size, color: '#A7F3D0' },
+    //     { x: vw * 0.5, y: vh * 0.6, size, color: '#C4B5FD' },
+    //     { x: vw * 0.8, y: vh * 0.3, size, color: '#FECDD3' },
+    //   ]
+    // }, 1000)
 
-    // 2.8s 后白色遮罩 → 跳转
+    // 1s 后白色遮罩 → 跳转
     setTimeout(() => {
       showWipe.value = true
-    }, 2800)
+    }, 1000)
 
-    // 3.8s 后跳转首页
+    // 2s 后跳转首页
     setTimeout(() => {
       router.push(String(route.query.redirect || '/'))
-    }, 3800)
+    }, 2000)
   } catch (error) {
     const msg = error instanceof Error ? error.message : '登录失败'
     message.error(msg)

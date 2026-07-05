@@ -4,20 +4,20 @@ import { useRoute } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { articleApi } from '@/api/article'
 import { categoryApi } from '@/api/category'
-import { tagApi } from '@/api/tag'
 import ArticleFeed from '@/components/article/ArticleFeed.vue'
 import MainLayout from '@/layouts/MainLayout.vue'
 import type { Article } from '@/types/article'
 import type { Category } from '@/types/category'
 import type { PageData } from '@/types/result'
-import type { Tag } from '@/types/tag'
+import type { ArticleSort } from '@/api/article'
 
 const route = useRoute()
 const message = useMessage()
 const articles = ref<Article[]>([])
 const categories = ref<Category[]>([])
-const tags = ref<Tag[]>([])
 const loading = ref(false)
+const selectedCategoryId = ref(0)
+const selectedSort = ref<ArticleSort>('recommend')
 
 /* ---- 分页 ---- */
 const currentPage = ref(1)
@@ -26,24 +26,18 @@ const totalArticles = ref(0)
 
 const searchKeyword = computed(() => (route.query.keyword as string) ?? '')
 
-const fallbackCategories: Category[] = [
-  { id: 0, name: '综合', code: 'general', description: '全部内容' },
-  { id: -1, name: '后端', code: 'backend', description: 'Java / Spring Boot' },
-  { id: -2, name: '前端', code: 'frontend', description: 'Vue / TypeScript' },
-  { id: -3, name: '人工智能', code: 'ai', description: 'AI / Agent' },
-]
+const allCategory: Category = { id: 0, name: '综合', code: 'all', description: '全部内容' }
 
-const fallbackTags: Tag[] = [
-  { id: 0, name: '全部' },
-  { id: -1, name: 'Java' },
-  { id: -2, name: 'Vue3' },
-  { id: -3, name: 'AI Coding' },
+const fallbackCategories: Category[] = [
+  { id: 1, name: 'AI / Agent', code: 'ai-agent', description: 'AI、Agent、coding agent 相关内容' },
+  { id: 2, name: 'Java 后端', code: 'java-backend', description: 'Java、Spring Boot、后端开发相关内容' },
+  { id: 3, name: '项目实战', code: 'project-practice', description: '项目开发、部署、踩坑记录' },
+  { id: 4, name: '随笔', code: 'notes', description: '临时想法、学习记录、杂谈' },
 ]
 
 const categoryItems = computed(() =>
-  categories.value.length ? categories.value : fallbackCategories,
+  [allCategory, ...(categories.value.length ? categories.value : fallbackCategories)],
 )
-const tagItems = computed(() => (tags.value.length ? tags.value : fallbackTags))
 
 async function loadArticles() {
   loading.value = true
@@ -53,6 +47,8 @@ async function loadArticles() {
       page: currentPage.value,
       pageSize,
       keyword: searchKeyword.value || undefined,
+      categoryId: selectedCategoryId.value === allCategory.id ? undefined : selectedCategoryId.value,
+      sort: selectedSort.value,
     })
     const data = result.data as PageData<Article>
     articles.value = data.list ?? []
@@ -67,14 +63,10 @@ async function loadArticles() {
 
 async function loadHomeData() {
   try {
-    const [categoryResult, tagResult] = await Promise.all([
-      categoryApi.getList(),
-      tagApi.getList(),
-    ])
+    const categoryResult = await categoryApi.getList()
     categories.value = categoryResult.data ?? []
-    tags.value = tagResult.data ?? []
   } catch {
-    // 分类/标签加载失败时使用 fallback，不阻断页面
+    // 分类加载失败时使用 fallback，不阻断页面
   }
 
   await loadArticles()
@@ -82,6 +74,18 @@ async function loadHomeData() {
 
 function onPageChange(page: number) {
   currentPage.value = page
+  loadArticles()
+}
+
+function onCategorySelect(category: Category) {
+  selectedCategoryId.value = category.id
+  currentPage.value = 1
+  loadArticles()
+}
+
+function onSortChange(sort: ArticleSort) {
+  selectedSort.value = sort
+  currentPage.value = 1
   loadArticles()
 }
 
@@ -98,24 +102,14 @@ watch(
 
 <template>
   <MainLayout>
-    <nav class="tag-strip" aria-label="标签导航">
-      <button
-        v-for="tag in tagItems"
-        :key="tag.id"
-        :class="{ active: tag.id === tagItems[0]?.id }"
-        type="button"
-      >
-        {{ tag.name }}
-      </button>
-    </nav>
-
-    <div class="feed-layout">
+    <div class="feed-layout home-feed-layout">
       <aside class="category-rail" aria-label="分类导航">
         <button
           v-for="category in categoryItems"
           :key="category.id"
-          :class="{ active: category.id === categoryItems[0]?.id }"
+          :class="{ active: category.id === selectedCategoryId }"
           type="button"
+          @click="onCategorySelect(category)"
         >
           <span class="category-icon">{{ category.name.slice(0, 1) }}</span>
           <span>{{ category.name }}</span>
@@ -128,8 +122,10 @@ watch(
         :loading="loading"
         :page="currentPage"
         :page-size="pageSize"
+        :sort="selectedSort"
         :total="totalArticles"
         @page-change="onPageChange"
+        @sort-change="onSortChange"
       />
     </div>
   </MainLayout>

@@ -1,0 +1,50 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - link "H 海林Blog" [ref=e5] [cursor=pointer]:
+      - /url: /
+      - generic [ref=e6]: H
+      - generic [ref=e7]: 海林Blog
+    - navigation "主导航" [ref=e8]:
+      - link "首页" [ref=e9] [cursor=pointer]:
+        - /url: /
+        - img [ref=e10]:
+          - img [ref=e11]
+        - text: 首页
+      - link "写文章" [ref=e14] [cursor=pointer]:
+        - /url: /editor
+        - img [ref=e15]:
+          - img [ref=e16]
+        - text: 写文章
+    - generic [ref=e20]:
+      - generic "搜索文章" [ref=e21]:
+        - searchbox "搜索文章" [ref=e22]
+        - img [ref=e23] [cursor=pointer]:
+          - img [ref=e24]
+      - button "创作中心" [ref=e28] [cursor=pointer]:
+        - text: 创作中心
+        - img [ref=e29]:
+          - img [ref=e30]
+      - link "登录" [ref=e32] [cursor=pointer]:
+        - /url: /login
+      - link "注册" [ref=e33] [cursor=pointer]:
+        - /url: /register
+  - main [ref=e34]:
+    - generic [ref=e35]:
+      - complementary "分类导航" [ref=e36]:
+        - button "A AI / Agent" [ref=e37] [cursor=pointer]:
+          - generic [ref=e38]: A
+          - generic [ref=e39]: AI / Agent
+        - button "J Java 后端" [ref=e40] [cursor=pointer]:
+          - generic [ref=e41]: J
+          - generic [ref=e42]: Java 后端
+        - button "项 项目实战" [ref=e43] [cursor=pointer]:
+          - generic [ref=e44]: 项
+          - generic [ref=e45]: 项目实战
+        - button "随 随笔" [ref=e46] [cursor=pointer]:
+          - generic [ref=e47]: 随
+          - generic [ref=e48]: 随笔
+      - generic [ref=e50]:
+        - button "推荐" [ref=e51] [cursor=pointer]
+        - button "最新" [ref=e52] [cursor=pointer]
+        - button "后端" [ref=e53] [cursor=pointer]
+        - button "前端" [ref=e54] [cursor=pointer]
