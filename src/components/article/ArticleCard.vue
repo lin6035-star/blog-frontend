@@ -1,11 +1,23 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { ChatbubbleOutline, Eye } from '@vicons/ionicons5'
+import {
+  ChatbubbleOutline,
+  Eye,
+  Heart,
+  HeartOutline,
+  Star,
+  StarOutline,
+} from '@vicons/ionicons5'
 import type { Article } from '@/types/article'
 import { formatArticleDate } from '@/utils/format'
 
 const props = defineProps<{
   article: Article
+}>()
+
+const emit = defineEmits<{
+  like: [article: Article]
+  favorite: [article: Article]
 }>()
 
 const authorDisplayName = computed(() =>
@@ -33,8 +45,32 @@ const authorDisplayName = computed(() =>
           </span>
           <span>
             <n-icon><ChatbubbleOutline /></n-icon>
-            讨论
+            {{ article.commentCount || 0 }}
           </span>
+          <button
+            class="article-stat-btn"
+            :class="{ active: article.liked === 1 }"
+            type="button"
+            @click.prevent.stop="emit('like', article)"
+          >
+            <n-icon>
+              <Heart v-if="article.liked === 1" />
+              <HeartOutline v-else />
+            </n-icon>
+            {{ article.likeCount || 0 }}
+          </button>
+          <button
+            class="article-stat-btn"
+            :class="{ active: article.favorited === 1 }"
+            type="button"
+            @click.prevent.stop="emit('favorite', article)"
+          >
+            <n-icon>
+              <Star v-if="article.favorited === 1" />
+              <StarOutline v-else />
+            </n-icon>
+            {{ article.favoriteCount || 0 }}
+          </button>
         </div>
       </div>
       <img

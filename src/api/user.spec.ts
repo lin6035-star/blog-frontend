@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const getMock = vi.fn()
 const postMock = vi.fn()
+const putMock = vi.fn()
 
 vi.mock('@/utils/request', () => ({
   default: {
     get: getMock,
     post: postMock,
+    put: putMock,
   },
 }))
 
@@ -14,6 +16,7 @@ describe('userApi', () => {
   beforeEach(() => {
     getMock.mockReset()
     postMock.mockReset()
+    putMock.mockReset()
   })
 
   it('requests current user profile without repeating the /api prefix', async () => {
@@ -22,6 +25,15 @@ describe('userApi', () => {
     userApi.getMe()
 
     expect(getMock).toHaveBeenCalledWith('/users/me')
+  })
+
+  it('updates current user profile without repeating the /api prefix', async () => {
+    const { userApi } = await import('./user')
+    const payload = { nickname: '新的昵称', bio: '新的个人简介' }
+
+    userApi.updateProfile(payload)
+
+    expect(putMock).toHaveBeenCalledWith('/users/me/profile', payload)
   })
 
   it('uploads avatar with multipart file field named file', async () => {

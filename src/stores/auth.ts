@@ -31,8 +31,16 @@ export const useAuthStore = defineStore('auth', {
   },
   actions: {
     restoreAuth() {
-      this.token = localStorage.getItem(TOKEN_KEY) ?? ''
-      this.usersVO = readStoredUser()
+      const token = localStorage.getItem(TOKEN_KEY) ?? ''
+      const usersVO = readStoredUser()
+
+      if (!token || !usersVO) {
+        this.clearAuth()
+        return
+      }
+
+      this.token = token
+      this.usersVO = usersVO
     },
     setAuth(token: string, usersVO: UsersVO) {
       this.token = token

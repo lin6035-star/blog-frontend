@@ -16,6 +16,8 @@ defineProps<{
 const emit = defineEmits<{
   'page-change': [page: number]
   'sort-change': [sort: ArticleSort]
+  like: [article: Article]
+  favorite: [article: Article]
 }>()
 
 const sortTabs: Array<{ label: string; value: ArticleSort }> = [
@@ -51,6 +53,8 @@ const sortTabs: Array<{ label: string; value: ArticleSort }> = [
         v-for="article in articles"
         :key="article.id"
         :article="article"
+        @like="emit('like', $event)"
+        @favorite="emit('favorite', $event)"
       />
     </div>
 

@@ -40,6 +40,16 @@ describe('useAuthStore', () => {
     expect(authStore.usersVO?.username).toBe('lin6035-star')
   })
 
+  it('clears stale token when stored user profile is missing', () => {
+    localStorage.setItem('blog_token', 'stale-token')
+    const authStore = useAuthStore()
+
+    authStore.restoreAuth()
+
+    expect(authStore.isLoggedIn).toBe(false)
+    expect(localStorage.getItem('blog_token')).toBeNull()
+  })
+
   it('clears local auth state after logout', () => {
     const authStore = useAuthStore()
     authStore.setAuth('token-123', user)

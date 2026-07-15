@@ -17,6 +17,21 @@ export const myArticleApi = {
       params: status !== undefined ? { page, pageSize, status } : { page, pageSize },
     })
   },
+  getLiked(page: number, pageSize: number) {
+    return request.get<PageData<Article>>('/users/me/liked', {
+      params: { page, pageSize },
+    })
+  },
+  getFavorited(page: number, pageSize: number) {
+    return request.get<PageData<Article>>('/users/me/favorited', {
+      params: { page, pageSize },
+    })
+  },
+  getCommented(page: number, pageSize: number) {
+    return request.get<PageData<Article>>('/users/me/commented', {
+      params: { page, pageSize },
+    })
+  },
   getDetail(id: number | string) {
     return request.get<Article>(`/users/me/articles/${id}`)
   },

@@ -72,6 +72,27 @@ describe('home information-flow layout', () => {
     expect(articleCard).not.toContain('作者 #{{ article.authorId }}')
   })
 
+  it('lets users like and favorite articles directly from the home feed cards', () => {
+    const home = readSource('views/HomeView.vue')
+    const feed = readSource('components/article/ArticleFeed.vue')
+    const articleCard = readSource('components/article/ArticleCard.vue')
+
+    expect(articleCard).toContain('Heart')
+    expect(articleCard).toContain('Star')
+    expect(articleCard).toContain('{{ article.likeCount || 0 }}')
+    expect(articleCard).toContain('{{ article.favoriteCount || 0 }}')
+    expect(articleCard).toContain("@click.prevent.stop=\"emit('like', article)\"")
+    expect(articleCard).toContain("@click.prevent.stop=\"emit('favorite', article)\"")
+    expect(feed).toContain("@like=\"emit('like', $event)\"")
+    expect(feed).toContain("@favorite=\"emit('favorite', $event)\"")
+    expect(home).toContain('function handleArticleLike(article: Article)')
+    expect(home).toContain('function handleArticleFavorite(article: Article)')
+    expect(home).toContain('message.warning(\'请先登录后再操作亲\')')
+    expect(home).toContain('@like="handleArticleLike"')
+    expect(home).toContain('@favorite="handleArticleFavorite"')
+    expect(home).not.toContain("router.push('/login')")
+  })
+
   it('shows article author nickname and category tag in the detail meta row', () => {
     const detail = readSource('views/ArticleDetailView.vue')
 
@@ -121,6 +142,16 @@ describe('home information-flow layout', () => {
     expect(home).toContain('delete cleanQuery.refresh')
   })
 
+  it('refreshes cached home articles when auth identity changes', () => {
+    const home = readSource('views/HomeView.vue')
+
+    expect(home).toContain('const authSignature = computed')
+    expect(home).toContain('const loadedAuthSignature = ref')
+    expect(home).toContain('function refreshArticlesForAuthChange()')
+    expect(home).toContain('onActivated(refreshArticlesForAuthChange)')
+    expect(home).toContain('watch(authSignature, refreshArticlesForAuthChange)')
+  })
+
   it('uses history back for the article detail return button', () => {
     const detail = readSource('views/ArticleDetailView.vue')
 
@@ -129,6 +160,36 @@ describe('home information-flow layout', () => {
     expect(detail).toContain('router.back()')
     expect(detail).toContain('@click="goBack"')
     expect(detail).not.toContain('class="back-link" to="/"')
+  })
+
+  it('keeps the article detail return bar sticky while reading', () => {
+    const detail = readSource('views/ArticleDetailView.vue')
+    const css = readSource('styles/index.css')
+
+    expect(detail).toContain('detailBackBarRef')
+    expect(detail).toContain('isDetailBackBarStuck')
+    expect(detail).toContain('updateDetailBackBarStuck')
+    expect(detail).toContain('class="detail-back-bar"')
+    expect(detail).toContain(':class="{ stuck: isDetailBackBarStuck }"')
+    expect(detail.indexOf('class="detail-back-bar"')).toBeLessThan(
+      detail.indexOf('class="detail-layout"'),
+    )
+
+    const barStart = css.indexOf('.detail-back-bar')
+    const barBlock = css.slice(barStart, css.indexOf('}', barStart))
+
+    expect(barBlock).toContain('position: sticky')
+    expect(barBlock).toContain('top: 64px')
+    expect(barBlock).toContain('z-index: 19')
+    expect(barBlock).toContain('width: 100vw')
+    expect(barBlock).toContain('margin-left: calc(50% - 50vw)')
+    expect(barBlock).toContain('background: transparent')
+
+    const stuckStart = css.indexOf('.detail-back-bar.stuck')
+    const stuckBlock = css.slice(stuckStart, css.indexOf('}', stuckStart))
+
+    expect(stuckBlock).toContain('background: rgba(239, 246, 243, 0.96)')
+    expect(stuckBlock).toContain('backdrop-filter')
   })
 
   it('does not show the article summary on the detail page', () => {

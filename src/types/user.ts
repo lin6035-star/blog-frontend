@@ -7,6 +7,11 @@ export interface UsersVO {
   createdAt: string
 }
 
+export interface UserProfileDTO {
+  nickname: string
+  bio: string
+}
+
 export interface AuthVO {
   token: string
   usersVO: UsersVO

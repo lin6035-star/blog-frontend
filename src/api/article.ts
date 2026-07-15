@@ -19,4 +19,16 @@ export const articleApi = {
   getDetail(id: number | string) {
     return request.get<Article>(`/articles/${id}`)
   },
+  like(articleId: number) {
+    return request.post(`/articles/${articleId}/like`)
+  },
+  unlike(articleId: number) {
+    return request.delete(`/articles/${articleId}/like`)
+  },
+  favorite(articleId: number) {
+    return request.post(`/articles/${articleId}/favorite`)
+  },
+  unfavorite(articleId: number) {
+    return request.delete(`/articles/${articleId}/favorite`)
+  },
 }

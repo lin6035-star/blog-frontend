@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { createDiscreteApi } from 'naive-ui'
 import HomeView from '@/views/HomeView.vue'
 import ArticleDetailView from '@/views/ArticleDetailView.vue'
 import LoginView from '@/views/LoginView.vue'
@@ -7,6 +8,8 @@ import ProfileView from '@/views/ProfileView.vue'
 import EditorView from '@/views/EditorView.vue'
 import DraftsView from '@/views/DraftsView.vue'
 import { useAuthStore } from '@/stores/auth'
+
+const { message } = createDiscreteApi(['message'])
 
 const router = createRouter({
   history: createWebHistory(),
@@ -71,17 +74,15 @@ const router = createRouter({
 
 router.beforeEach((to) => {
   if (to.meta.requiresAuth && !useAuthStore().isLoggedIn) {
-    return {
-      path: '/login',
-      query: { redirect: to.fullPath },
-    }
+    message.warning('请先登录后再操作亲')
+    return false
   }
 
   return true
 })
 
 router.afterEach((to) => {
-  document.title = `${String(to.meta.title ?? '博客')} - FlowBlog`
+  document.title = `${String(to.meta.title ?? '博客')} - 海林Blog`
 })
 
 export default router

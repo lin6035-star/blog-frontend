@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { articleApi } from '@/api/article'
 import { categoryApi } from '@/api/category'
 import ArticleFeed from '@/components/article/ArticleFeed.vue'
 import MainLayout from '@/layouts/MainLayout.vue'
+import { useAuthStore } from '@/stores/auth'
 import type { Article } from '@/types/article'
 import type { Category } from '@/types/category'
 import type { PageData } from '@/types/result'
@@ -16,11 +17,13 @@ defineOptions({ name: 'HomeView' })
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+const authStore = useAuthStore()
 const articles = ref<Article[]>([])
 const categories = ref<Category[]>([])
 const loading = ref(false)
 const selectedCategoryId = ref(0)
 const selectedSort = ref<ArticleSort>('recommend')
+const articleActionKeys = ref(new Set<string>())
 
 /* ---- 分页 ---- */
 const currentPage = ref(1)
@@ -29,6 +32,10 @@ const totalArticles = ref(0)
 
 const searchKeyword = computed(() => (route.query.keyword as string) ?? '')
 const isHomeRoute = computed(() => route.name === 'home')
+const authSignature = computed(() =>
+  authStore.isLoggedIn && authStore.usersVO ? `user:${authStore.usersVO.id}` : 'guest',
+)
+const loadedAuthSignature = ref('')
 
 const allCategory: Category = { id: 0, name: '综合', code: 'all', description: '全部内容' }
 
@@ -74,6 +81,17 @@ async function loadHomeData() {
   }
 
   await loadArticles()
+  loadedAuthSignature.value = authSignature.value
+}
+
+async function refreshArticlesForAuthChange() {
+  if (!isHomeRoute.value || loadedAuthSignature.value === authSignature.value) {
+    return
+  }
+
+  currentPage.value = 1
+  await loadArticles()
+  loadedAuthSignature.value = authSignature.value
 }
 
 function resetHomeState() {
@@ -101,7 +119,86 @@ function onSortChange(sort: ArticleSort) {
   loadArticles()
 }
 
+function beginArticleAction(key: string) {
+  if (articleActionKeys.value.has(key)) {
+    return false
+  }
+
+  articleActionKeys.value = new Set([...articleActionKeys.value, key])
+  return true
+}
+
+function finishArticleAction(key: string) {
+  const nextKeys = new Set(articleActionKeys.value)
+  nextKeys.delete(key)
+  articleActionKeys.value = nextKeys
+}
+
+async function handleArticleLike(article: Article) {
+  if (!authStore.isLoggedIn) {
+    message.warning('请先登录后再操作亲')
+    return
+  }
+
+  const actionKey = `like-${article.id}`
+  if (!beginArticleAction(actionKey)) {
+    return
+  }
+
+  const wasLiked = article.liked === 1
+  try {
+    if (wasLiked) {
+      await articleApi.unlike(article.id)
+      article.liked = 0
+      article.likeCount = Math.max(0, (article.likeCount || 0) - 1)
+    } else {
+      await articleApi.like(article.id)
+      article.liked = 1
+      article.likeCount = (article.likeCount || 0) + 1
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : '操作失败'
+    message.error(msg)
+  } finally {
+    finishArticleAction(actionKey)
+  }
+}
+
+async function handleArticleFavorite(article: Article) {
+  if (!authStore.isLoggedIn) {
+    message.warning('请先登录后再操作亲')
+    return
+  }
+
+  const actionKey = `favorite-${article.id}`
+  if (!beginArticleAction(actionKey)) {
+    return
+  }
+
+  const wasFavorited = article.favorited === 1
+  try {
+    if (wasFavorited) {
+      await articleApi.unfavorite(article.id)
+      article.favorited = 0
+      article.favoriteCount = Math.max(0, (article.favoriteCount || 0) - 1)
+    } else {
+      await articleApi.favorite(article.id)
+      article.favorited = 1
+      article.favoriteCount = (article.favoriteCount || 0) + 1
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : '操作失败'
+    message.error(msg)
+  } finally {
+    finishArticleAction(actionKey)
+  }
+}
+
 onMounted(loadHomeData)
+
+onActivated(refreshArticlesForAuthChange)
+
+watch(authSignature, refreshArticlesForAuthChange)
 
 watch(
   () => route.query.keyword,
@@ -156,6 +253,8 @@ watch(
         :page-size="pageSize"
         :sort="selectedSort"
         :total="totalArticles"
+        @like="handleArticleLike"
+        @favorite="handleArticleFavorite"
         @page-change="onPageChange"
         @sort-change="onSortChange"
       />

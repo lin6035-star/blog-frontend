@@ -14,6 +14,8 @@ interface CreateRequestOptions {
 }
 
 type AxiosMethods = 'get' | 'post' | 'put' | 'patch' | 'delete'
+const TOKEN_KEY = 'blog_token'
+const USER_KEY = 'blog_user'
 
 export type ResultRequest = Omit<AxiosInstance, AxiosMethods> & {
   get<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<Result<T>>
@@ -35,6 +37,28 @@ export type ResultRequest = Omit<AxiosInstance, AxiosMethods> & {
   delete<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<Result<T>>
 }
 
+function readLocalAuthToken() {
+  const token = localStorage.getItem(TOKEN_KEY) ?? ''
+  if (!token) {
+    return ''
+  }
+
+  const rawUser = localStorage.getItem(USER_KEY)
+  if (!rawUser) {
+    localStorage.removeItem(TOKEN_KEY)
+    return ''
+  }
+
+  try {
+    JSON.parse(rawUser)
+    return token
+  } catch {
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(USER_KEY)
+    return ''
+  }
+}
+
 export function createRequest(options: CreateRequestOptions = {}): ResultRequest {
   const instance = axios.create({
     baseURL: '/api',
@@ -43,7 +67,7 @@ export function createRequest(options: CreateRequestOptions = {}): ResultRequest
   })
 
   instance.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-    const token = options.getToken?.() ?? localStorage.getItem('blog_token') ?? ''
+    const token = options.getToken ? options.getToken() : readLocalAuthToken()
 
     if (token) {
       config.headers.Authorization = `Bearer ${token}`

@@ -13,6 +13,26 @@ function okResponse(config: InternalAxiosRequestConfig, data: unknown): AxiosRes
 }
 
 describe('createRequest', () => {
+  it('does not append stale token when stored user profile is missing', async () => {
+    localStorage.setItem('blog_token', 'stale-token')
+    let capturedConfig: InternalAxiosRequestConfig | undefined
+    const request = createRequest({
+      adapter: async (config) => {
+        capturedConfig = config
+        return okResponse(config, {
+          code: 0,
+          message: 'success',
+          data: [],
+        })
+      },
+    })
+
+    await request.get('/articles')
+
+    expect(capturedConfig?.headers.Authorization).toBeUndefined()
+    expect(localStorage.getItem('blog_token')).toBeNull()
+  })
+
   it('uses /api as baseURL and appends bearer token when token exists', async () => {
     let capturedConfig: InternalAxiosRequestConfig | undefined
     const adapter: AxiosAdapter = async (config) => {
