@@ -16,6 +16,9 @@ export const articleApi = {
   getList(params?: ArticleListParams) {
     return request.get<PageData<Article>>('/articles', { params })
   },
+  getHotList(params?: Pick<ArticleListParams, 'page' | 'pageSize'>) {
+    return request.get<PageData<Article>>('/articles/hot', { params })
+  },
   getDetail(id: number | string) {
     return request.get<Article>(`/articles/${id}`)
   },

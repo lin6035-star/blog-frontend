@@ -11,4 +11,7 @@ export const authApi = {
   logout() {
     return request.post<null>('/auth/logout')
   },
+  getGitHubAuthUrl() {
+    return request.get<{ url: string }>('/auth/github/url')
+  },
 }

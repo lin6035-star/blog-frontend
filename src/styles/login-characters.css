@@ -364,51 +364,63 @@
     background: rgba(255, 255, 255, 0.85);
 }
 
-/* 注册页字段更多，使用紧凑布局，避免顶部星形和标题被挤出视口 */
+/* 注册页字段和 GitHub 登录入口更多，使用紧凑布局，避免底部登录入口被挤出视口 */
 .register-page .login-right {
-    padding: 28px 40px;
+    max-height: calc(100vh - 48px);
+    padding: 22px 40px;
     align-items: center;
+    overflow-y: auto;
 }
 
 .register-page .form-wrapper {
-    max-width: 390px;
+    max-width: 380px;
 }
 
 .register-page .login-star {
-    width: 28px;
-    height: 28px;
-    margin-bottom: 16px;
+    width: 24px;
+    height: 24px;
+    margin-bottom: 10px;
 }
 
 .register-page .login-title {
-    font-size: 30px;
-    margin-bottom: 6px;
+    font-size: 28px;
+    margin-bottom: 4px;
 }
 
 .register-page .login-subtitle {
-    margin-bottom: 24px;
+    margin-bottom: 16px;
 }
 
 .register-page .login-input-group {
-    margin-bottom: 14px;
+    margin-bottom: 10px;
 }
 
 .register-page .login-input-group label {
-    margin-bottom: 6px;
+    margin-bottom: 5px;
 }
 
 .register-page .login-input-wrap input {
-    padding: 12px 16px;
-    min-height: 54px;
+    min-height: 46px;
+    padding: 10px 16px;
 }
 
 .register-page .login-btn {
-    min-height: 54px;
-    margin-top: 8px;
+    min-height: 46px;
+    margin-top: 4px;
+    margin-bottom: 10px;
+    padding: 11px 14px;
+}
+
+.register-page .login-divider {
+    margin-bottom: 10px;
+}
+
+.register-page .login-btn-github {
+    min-height: 46px;
 }
 
 .register-page .login-signup {
-    margin-top: 22px;
+    margin-top: 10px;
 }
 
 /* 密码切换按钮 */
@@ -519,6 +531,46 @@
     opacity: 0.6;
     cursor: not-allowed;
     transform: none;
+}
+
+/* GitHub 登录按钮 */
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+  color: #a1a1aa;
+  font-size: 13px;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #e4e4e7;
+}
+
+.login-btn-github {
+  background: #24292f;
+  color: #fff;
+  border: none;
+}
+
+.login-btn-github:hover {
+  background: #1b1f24;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+}
+
+.login-btn-github:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.github-icon {
+  flex-shrink: 0;
 }
 
 .login-signup {

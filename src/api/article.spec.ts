@@ -58,4 +58,14 @@ describe('articleApi', () => {
 
     expect(getMock).toHaveBeenCalledWith('/articles/12')
   })
+
+  it('requests hot ranked articles without repeating the /api prefix', async () => {
+    const { articleApi } = await import('./article')
+
+    articleApi.getHotList({ page: 1, pageSize: 5 })
+
+    expect(getMock).toHaveBeenCalledWith('/articles/hot', {
+      params: { page: 1, pageSize: 5 },
+    })
+  })
 })

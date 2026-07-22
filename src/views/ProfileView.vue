@@ -14,11 +14,13 @@ import {
   TrashOutline,
 } from '@vicons/ionicons5'
 import { myArticleApi } from '@/api/myArticle'
+import { publicUserApi } from '@/api/publicUser'
 import { ARTICLE_STATUS, getArticleStatusLabel } from '@/constants/articleStatus'
 import { userApi } from '@/api/user'
 import MainLayout from '@/layouts/MainLayout.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { Article } from '@/types/article'
+import type { UserRelation } from '@/types/publicUser'
 import { formatArticleDate, formatArticleDateTime } from '@/utils/format'
 
 const router = useRouter()
@@ -40,7 +42,7 @@ const profileForm = reactive({
   bio: '',
 })
 
-type ProfileTabKey = 'published' | 'liked' | 'favorited' | 'commented'
+type ProfileTabKey = 'published' | 'liked' | 'favorited' | 'commented' | 'following' | 'followers'
 
 const activeTab = ref<ProfileTabKey>('published')
 const profileTabs = [
@@ -48,6 +50,8 @@ const profileTabs = [
   { key: 'liked', label: '我喜欢的' },
   { key: 'favorited', label: '我收藏的' },
   { key: 'commented', label: '我评论的' },
+  { key: 'following', label: '我关注的' },
+  { key: 'followers', label: '关注我的' },
 ] satisfies Array<{ key: ProfileTabKey; label: string }>
 
 const profileTabText: Record<ProfileTabKey, { empty: string; status: string }> = {
@@ -55,6 +59,8 @@ const profileTabText: Record<ProfileTabKey, { empty: string; status: string }> =
   liked: { empty: '还没有喜欢的文章', status: '喜欢' },
   favorited: { empty: '还没有收藏的文章', status: '收藏' },
   commented: { empty: '还没有评论过文章', status: '评论过' },
+  following: { empty: '还没有关注其他用户', status: '' },
+  followers: { empty: '还没有关注者', status: '' },
 }
 
 function goBack() {
@@ -82,6 +88,9 @@ const articleLoading = ref(false)
 const currentPage = ref(1)
 const pageSize = 2
 const total = ref(0)
+const relationUsers = ref<UserRelation[]>([])
+const relationActionKeys = ref(new Set<string>())
+const isRelationTab = computed(() => activeTab.value === 'following' || activeTab.value === 'followers')
 
 function getArticleTabRequest(key: ProfileTabKey, page: number) {
   if (key === 'liked') {
@@ -99,13 +108,33 @@ function getArticleTabRequest(key: ProfileTabKey, page: number) {
 async function loadArticlesForTab(key: ProfileTabKey = activeTab.value, page = currentPage.value) {
   articleLoading.value = true
   try {
+    if (key === 'following') {
+      const res = await publicUserApi.getFollowing(user.value!.id, page, pageSize)
+      const data = res.data
+      relationUsers.value = data.list ?? []
+      articles.value = []
+      total.value = data.total ?? 0
+      currentPage.value = data.page ?? page
+      return
+    }
+    if (key === 'followers') {
+      const res = await publicUserApi.getFollowers(user.value!.id, page, pageSize)
+      const data = res.data
+      relationUsers.value = data.list ?? []
+      articles.value = []
+      total.value = data.total ?? 0
+      currentPage.value = data.page ?? page
+      return
+    }
+
     const res = await getArticleTabRequest(key, page)
     const data = res.data
     articles.value = data.list ?? []
+    relationUsers.value = []
     total.value = data.total ?? 0
     currentPage.value = data.page ?? page
   } catch {
-    message.error('文章加载失败')
+    message.error('加载失败')
   } finally {
     articleLoading.value = false
   }
@@ -113,6 +142,56 @@ async function loadArticlesForTab(key: ProfileTabKey = activeTab.value, page = c
 
 function goToArticle(article: Article) {
   router.push(`/articles/${article.id}`)
+}
+
+/* ---- 关注列表操作 ---- */
+function goToUserProfile(userId: number) {
+  router.push(`/users/${userId}`)
+}
+
+function beginRelationAction(key: string) {
+  if (relationActionKeys.value.has(key)) return false
+  relationActionKeys.value = new Set([...relationActionKeys.value, key])
+  return true
+}
+
+function finishRelationAction(key: string) {
+  const nextKeys = new Set(relationActionKeys.value)
+  nextKeys.delete(key)
+  relationActionKeys.value = nextKeys
+}
+
+async function handleRelationFollowToggle(relationUser: UserRelation) {
+  if (relationUser.self) return
+
+  const actionKey = `relation-follow-${relationUser.id}`
+  if (!beginRelationAction(actionKey)) return
+
+  const wasFollowed = relationUser.followed
+  try {
+    if (wasFollowed) {
+      await publicUserApi.cancelFollow(relationUser.id)
+      relationUser.followed = false
+      if (activeTab.value === 'following') {
+        // 取消关注后从列表移除
+        relationUsers.value = relationUsers.value.filter((u) => u.id !== relationUser.id)
+        total.value = Math.max(0, total.value - 1)
+      }
+      if (user.value) {
+        user.value.followingCount = Math.max(0, (user.value.followingCount || 0) - 1)
+      }
+    } else {
+      await publicUserApi.follow(relationUser.id)
+      relationUser.followed = true
+      if (user.value) {
+        user.value.followingCount = (user.value.followingCount || 0) + 1
+      }
+    }
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '操作失败')
+  } finally {
+    finishRelationAction(actionKey)
+  }
 }
 
 function handleEdit(article: Article) {
@@ -174,6 +253,7 @@ function switchTab(key: ProfileTabKey) {
 
   activeTab.value = key
   articles.value = []
+  relationUsers.value = []
   total.value = 0
   loadArticlesForTab(key, 1)
 }
@@ -307,11 +387,11 @@ onMounted(() => {
           <div class="profile-follow-row">
             <div class="profile-follow-item">
               <span class="profile-follow-label">关注了</span>
-              <strong>0</strong>
+              <strong>{{ user?.followingCount || 0 }}</strong>
             </div>
             <div class="profile-follow-item">
               <span class="profile-follow-label">关注者</span>
-              <strong>0</strong>
+              <strong>{{ user?.followersCount || 0 }}</strong>
             </div>
           </div>
           <div class="profile-join-row">
@@ -346,8 +426,13 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 空态 -->
-        <div v-else-if="!articles.length" class="profile-empty">
+        <!-- 空态：关注列表 -->
+        <div v-else-if="isRelationTab && !relationUsers.length" class="profile-empty">
+          <p class="profile-tab-empty-title">{{ profileTabText[activeTab].empty }}</p>
+        </div>
+
+        <!-- 空态：文章列表 -->
+        <div v-else-if="!isRelationTab && !articles.length" class="profile-empty">
           <p class="profile-tab-empty-title">{{ profileTabText[activeTab].empty }}</p>
           <router-link
             v-if="activeTab === 'published'"
@@ -356,6 +441,40 @@ onMounted(() => {
           >
             去写文章
           </router-link>
+        </div>
+
+        <!-- 关注列表 -->
+        <div v-else-if="isRelationTab && relationUsers.length" class="profile-relation-list">
+          <div
+            v-for="relUser in relationUsers"
+            :key="relUser.id"
+            class="profile-relation-row"
+            role="button"
+            tabindex="0"
+            @click="goToUserProfile(relUser.id)"
+            @keydown.enter="goToUserProfile(relUser.id)"
+          >
+            <n-avatar :size="50" :src="relUser.avatarUrl">
+              <template #fallback>
+                <n-icon><Person /></n-icon>
+              </template>
+            </n-avatar>
+
+            <div class="profile-relation-info">
+              <h3>{{ relUser.nickname || `#${relUser.id}` }}</h3>
+              <p>{{ relUser.bio || '这个人还没有写简介。' }}</p>
+            </div>
+
+            <n-button
+              v-if="!relUser.self"
+              type="primary"
+              :secondary="relUser.followed"
+              :loading="relationActionKeys.has(`relation-follow-${relUser.id}`)"
+              @click.stop="handleRelationFollowToggle(relUser)"
+            >
+              {{ relUser.followed ? '已关注' : '关注' }}
+            </n-button>
+          </div>
         </div>
 
         <!-- 文章列表 -->
@@ -837,6 +956,56 @@ onMounted(() => {
   color: #e74c3c;
   border-color: #e74c3c;
   background: #fef2f2;
+}
+
+/* ---- 关注列表 ---- */
+.profile-relation-list {
+  display: grid;
+}
+
+.profile-relation-row {
+  display: grid;
+  grid-template-columns: 50px minmax(0, 1fr) 100px;
+  align-items: center;
+  gap: 18px;
+  min-height: 96px;
+  padding: 18px 24px;
+  border-bottom: 1px solid #eef0f2;
+  cursor: pointer;
+  transition: background 0.16s;
+}
+
+.profile-relation-row:hover {
+  background: #fbfdfc;
+}
+
+.profile-relation-row:focus-visible {
+  outline: 2px solid rgba(47, 111, 115, 0.36);
+  outline-offset: -2px;
+}
+
+.profile-relation-info {
+  min-width: 0;
+}
+
+.profile-relation-info h3 {
+  margin: 0 0 6px;
+  overflow: hidden;
+  color: #111827;
+  font-size: 17px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-relation-info p {
+  margin: 0;
+  overflow: hidden;
+  color: #6b7280;
+  font-size: 14px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- 分页 ---- */

@@ -10,18 +10,20 @@ import {
   Star,
   StarOutline,
 } from '@vicons/ionicons5'
-import { Marked } from 'marked'
 import { articleApi } from '@/api/article'
-import { useAuthStore } from '@/stores/auth'
+import { publicUserApi } from '@/api/publicUser'
+import { useLoginGuard } from '@/composables/useLoginGuard'
 import CommentSection from '@/components/comment/CommentSection.vue'
 import MainLayout from '@/layouts/MainLayout.vue'
 import type { Article } from '@/types/article'
+import type { PublicUserInfo } from '@/types/publicUser'
 import { formatArticleDateTime } from '@/utils/format'
+import { renderArticleWithOutline } from '@/utils/articleOutline'
 
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-const authStore = useAuthStore()
+const { check: requireLogin } = useLoginGuard()
 const article = ref<Article | null>(null)
 const loading = ref(false)
 const liked = ref(false)
@@ -30,19 +32,41 @@ const likeCount = ref(0)
 const favoriteCount = ref(0)
 const liking = ref(false)
 const favoriting = ref(false)
+const authorProfile = ref<PublicUserInfo | null>(null)
+const followBusy = ref(false)
 const detailBackBarRef = ref<HTMLElement | null>(null)
 const isDetailBackBarStuck = ref(false)
 
-const marked = new Marked()
+const renderedArticle = computed(() => {
+  if (!article.value?.content) return null
+  return renderArticleWithOutline(article.value.content)
+})
 
 const renderedContent = computed(() => {
-  if (!article.value?.content) return ''
-  return marked.parse(article.value.content) as string
+  if (!renderedArticle.value) return ''
+  return renderedArticle.value.html
+})
+
+const outlineItems = computed(() => {
+  if (!renderedArticle.value) return []
+  return renderedArticle.value.outline
 })
 
 const authorDisplayName = computed(() =>
   article.value?.authorName?.trim() || `#${article.value?.authorId}`,
 )
+
+const authorInitial = computed(() => authorDisplayName.value.slice(0, 1).toUpperCase())
+
+async function loadAuthorProfile() {
+  if (!article.value?.authorId) return
+  try {
+    const result = await publicUserApi.getInfo(article.value.authorId)
+    authorProfile.value = result.data
+  } catch {
+    // 作者信息加载失败不阻塞页面
+  }
+}
 
 async function loadArticle() {
   loading.value = true
@@ -54,6 +78,7 @@ async function loadArticle() {
     favorited.value = result.data.favorited === 1
     likeCount.value = result.data.likeCount || 0
     favoriteCount.value = result.data.favoriteCount || 0
+    loadAuthorProfile()
   } catch (error) {
     const msg = error instanceof Error ? error.message : '文章加载失败'
     message.error(msg)
@@ -81,12 +106,28 @@ function updateDetailBackBarStuck() {
   isDetailBackBarStuck.value = window.scrollY > 0 && bar.getBoundingClientRect().top <= 64
 }
 
-async function handleLike() {
-  if (liking.value) return
-  if (!authStore.isLoggedIn) {
-    message.warning('请先登录后再操作亲')
+function scrollToOutlineItem(id: string) {
+  document.getElementById(id)?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'start',
+  })
+}
+
+function showComingSoon(feature: string) {
+  message.info(`${feature}功能后面接入，先占个位置`)
+}
+
+function goToAuthorProfile(tab?: string) {
+  if (!article.value?.authorId) {
     return
   }
+
+  router.push({ path: `/users/${article.value.authorId}`, query: tab ? { tab } : {} })
+}
+
+async function handleLike() {
+  if (liking.value) return
+  if (!requireLogin()) return
 
   liking.value = true
   const wasLiked = liked.value
@@ -109,10 +150,7 @@ async function handleLike() {
 
 async function handleFavorite() {
   if (favoriting.value) return
-  if (!authStore.isLoggedIn) {
-    message.warning('请先登录后再操作亲')
-    return
-  }
+  if (!requireLogin()) return
 
   favoriting.value = true
   const wasFavorited = favorited.value
@@ -130,6 +168,31 @@ async function handleFavorite() {
     message.error(error instanceof Error ? error.message : '操作失败')
   } finally {
     favoriting.value = false
+  }
+}
+
+async function handleAuthorFollow() {
+  if (!authorProfile.value || authorProfile.value.self || followBusy.value) return
+  if (!requireLogin()) return
+
+  followBusy.value = true
+  const wasFollowed = authorProfile.value.followed
+  try {
+    if (wasFollowed) {
+      await publicUserApi.cancelFollow(authorProfile.value.id)
+      authorProfile.value.followed = false
+      authorProfile.value.followersCount = Math.max(0, (authorProfile.value.followersCount || 0) - 1)
+      message.success('已取消关注')
+    } else {
+      await publicUserApi.follow(authorProfile.value.id)
+      authorProfile.value.followed = true
+      authorProfile.value.followersCount = (authorProfile.value.followersCount || 0) + 1
+      message.success('关注成功')
+    }
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '操作失败')
+  } finally {
+    followBusy.value = false
   }
 }
 
@@ -196,7 +259,7 @@ onBeforeUnmount(() => {
               <p class="eyebrow">ARTICLE</p>
               <h1>{{ article.title }}</h1>
               <div class="detail-meta">
-                <span>作者：{{ authorDisplayName }}</span>
+                <button class="article-author-link" type="button" @click="goToAuthorProfile()">作者：{{ authorDisplayName }}</button>
                 <span>{{ formatArticleDateTime(article.publishedAt, '未发布') }}</span>
                 <span v-if="article.categoryName" class="article-category-tag">
                   #{{ article.categoryName }}
@@ -221,6 +284,65 @@ onBeforeUnmount(() => {
           </article>
         </n-spin>
       </div>
+
+      <aside v-if="article" class="detail-right-rail">
+        <section class="detail-author-card">
+          <div class="detail-author-profile">
+            <div class="detail-author-avatar" @click="goToAuthorProfile()">
+              <img v-if="authorProfile?.avatarUrl" :src="authorProfile.avatarUrl" class="detail-author-avatar-img" alt="" />
+              <template v-else>{{ authorInitial }}</template>
+            </div>
+            <div class="detail-author-info">
+              <p class="detail-author-label">本文作者</p>
+              <h3>{{ authorDisplayName }}</h3>
+            </div>
+          </div>
+
+          <div class="detail-author-stats">
+            <div class="detail-author-stat-item" @click="goToAuthorProfile('articles')">
+              <strong>{{ authorProfile?.articlesCount ?? '--' }}</strong>
+              <span>文章</span>
+            </div>
+            <div class="detail-author-stat-item" @click="goToAuthorProfile('following')">
+              <strong>{{ authorProfile?.followingCount ?? '--' }}</strong>
+              <span>关注</span>
+            </div>
+            <div class="detail-author-stat-item" @click="goToAuthorProfile('followers')">
+              <strong>{{ authorProfile?.followersCount ?? '--' }}</strong>
+              <span>关注者</span>
+            </div>
+          </div>
+
+          <div class="detail-author-actions">
+            <button v-if="!authorProfile?.self" type="button" :disabled="followBusy || !authorProfile" @click="handleAuthorFollow">
+              {{ followBusy ? '…' : authorProfile?.followed ? '已关注' : '关注' }}
+            </button>
+            <button type="button" @click="showComingSoon('私信')">私信</button>
+          </div>
+        </section>
+
+        <section class="detail-outline-card">
+          <div class="detail-outline-header">
+            <h3>内容纲要</h3>
+            <span>{{ outlineItems.length }} 节</span>
+          </div>
+
+          <nav v-if="outlineItems.length" class="detail-outline-list">
+            <button
+              v-for="item in outlineItems"
+              :key="item.id"
+              class="detail-outline-item"
+              :class="`level-${item.level}`"
+              type="button"
+              @click="scrollToOutlineItem(item.id)"
+            >
+              {{ item.text }}
+            </button>
+          </nav>
+
+          <p v-else class="detail-outline-empty">这篇文章暂时没有可生成目录的二级标题。</p>
+        </section>
+      </aside>
     </div>
   </MainLayout>
 </template>

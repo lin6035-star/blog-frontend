@@ -5,6 +5,7 @@ import { useMessage } from 'naive-ui'
 import { articleApi } from '@/api/article'
 import { categoryApi } from '@/api/category'
 import ArticleFeed from '@/components/article/ArticleFeed.vue'
+import ArticleHotRankCard from '@/components/article/ArticleHotRankCard.vue'
 import MainLayout from '@/layouts/MainLayout.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { Article } from '@/types/article'
@@ -21,6 +22,8 @@ const authStore = useAuthStore()
 const articles = ref<Article[]>([])
 const categories = ref<Category[]>([])
 const loading = ref(false)
+const loadingMore = ref(false)
+const loadMoreError = ref(false)
 const selectedCategoryId = ref(0)
 const selectedSort = ref<ArticleSort>('recommend')
 const articleActionKeys = ref(new Set<string>())
@@ -32,6 +35,7 @@ const totalArticles = ref(0)
 
 const searchKeyword = computed(() => (route.query.keyword as string) ?? '')
 const isHomeRoute = computed(() => route.name === 'home')
+const hasMore = computed(() => articles.value.length < totalArticles.value)
 const authSignature = computed(() =>
   authStore.isLoggedIn && authStore.usersVO ? `user:${authStore.usersVO.id}` : 'guest',
 )
@@ -50,25 +54,38 @@ const categoryItems = computed(() =>
   [allCategory, ...(categories.value.length ? categories.value : fallbackCategories)],
 )
 
-async function loadArticles() {
-  loading.value = true
+async function loadArticles(nextPage = 1) {
+  const isFirstPage = nextPage === 1
+
+  if (isFirstPage) {
+    loading.value = true
+  } else {
+    loadingMore.value = true
+  }
+  loadMoreError.value = false
 
   try {
     const result = await articleApi.getList({
-      page: currentPage.value,
+      page: nextPage,
       pageSize,
       keyword: searchKeyword.value || undefined,
       categoryId: selectedCategoryId.value === allCategory.id ? undefined : selectedCategoryId.value,
       sort: selectedSort.value,
     })
     const data = result.data as PageData<Article>
-    articles.value = data.list ?? []
+    const list = data.list ?? []
+    articles.value = isFirstPage ? list : [...articles.value, ...list]
     totalArticles.value = data.total ?? 0
+    currentPage.value = data.page ?? nextPage
   } catch (error) {
+    if (!isFirstPage) {
+      loadMoreError.value = true
+    }
     const msg = error instanceof Error ? error.message : '文章加载失败'
     message.error(msg)
   } finally {
     loading.value = false
+    loadingMore.value = false
   }
 }
 
@@ -90,7 +107,7 @@ async function refreshArticlesForAuthChange() {
   }
 
   currentPage.value = 1
-  await loadArticles()
+  await loadArticles(1)
   loadedAuthSignature.value = authSignature.value
 }
 
@@ -100,23 +117,33 @@ function resetHomeState() {
   currentPage.value = 1
   articles.value = []
   totalArticles.value = 0
+  loadMoreError.value = false
 }
 
-function onPageChange(page: number) {
-  currentPage.value = page
-  loadArticles()
+function reloadArticles() {
+  currentPage.value = 1
+  articles.value = []
+  totalArticles.value = 0
+  loadMoreError.value = false
+  void loadArticles(1)
+}
+
+function loadMoreArticles() {
+  if (loading.value || loadingMore.value || !hasMore.value) {
+    return
+  }
+
+  void loadArticles(currentPage.value + 1)
 }
 
 function onCategorySelect(category: Category) {
   selectedCategoryId.value = category.id
-  currentPage.value = 1
-  loadArticles()
+  reloadArticles()
 }
 
 function onSortChange(sort: ArticleSort) {
   selectedSort.value = sort
-  currentPage.value = 1
-  loadArticles()
+  reloadArticles()
 }
 
 function beginArticleAction(key: string) {
@@ -194,6 +221,14 @@ async function handleArticleFavorite(article: Article) {
   }
 }
 
+function goToAuthorProfile(authorId: number) {
+  router.push(`/users/${authorId}`)
+}
+
+function goToArticle(article: Article) {
+  router.push(`/articles/${article.id}`)
+}
+
 onMounted(loadHomeData)
 
 onActivated(refreshArticlesForAuthChange)
@@ -208,7 +243,7 @@ watch(
     }
 
     currentPage.value = 1
-    loadArticles()
+    reloadArticles()
   },
 )
 
@@ -248,16 +283,23 @@ watch(
       <ArticleFeed
         class="main-feed"
         :articles="articles"
+        :has-more="hasMore"
         :loading="loading"
-        :page="currentPage"
-        :page-size="pageSize"
+        :loading-more="loadingMore"
+        :load-more-error="loadMoreError"
         :sort="selectedSort"
         :total="totalArticles"
+        @open="goToArticle"
         @like="handleArticleLike"
         @favorite="handleArticleFavorite"
-        @page-change="onPageChange"
+        @author-click="goToAuthorProfile"
+        @load-more="loadMoreArticles"
         @sort-change="onSortChange"
       />
+
+      <aside class="home-side-rail" aria-label="首页侧边栏">
+        <ArticleHotRankCard />
+      </aside>
     </div>
   </MainLayout>
 </template>

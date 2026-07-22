@@ -60,6 +60,22 @@ describe('article detail comment section', () => {
     expect(editor).toContain(':loading="submitting"')
   })
 
+  it('loads more main comments when the bottom trigger enters the viewport', () => {
+    const section = readSource('components/comment/CommentSection.vue')
+
+    expect(section).toContain('const commentLoadMoreTriggerRef = ref<HTMLElement | null>(null)')
+    expect(section).toContain('let commentObserver: IntersectionObserver | null = null')
+    expect(section).toContain('new IntersectionObserver')
+    expect(section).toContain('handleCommentLoadMoreIntersect')
+    expect(section).toContain('commentObserver.observe(commentLoadMoreTriggerRef.value)')
+    expect(section).toContain('ref="commentLoadMoreTriggerRef"')
+    expect(section).toContain('class="comment-load-more-trigger"')
+    expect(section).toContain('正在加载更多评论...')
+    expect(section).toContain('继续下滑查看更多评论')
+    expect(section).not.toContain('@click="loadMoreComments"')
+    expect(section).not.toContain('>加载更多</n-button>')
+  })
+
   it('shows flat reply threads with author, time, like count and ip location', () => {
     const item = readSource('components/comment/CommentItem.vue')
 

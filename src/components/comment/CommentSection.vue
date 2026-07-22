@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, type Ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import { useDialog, useMessage } from 'naive-ui'
 import { ChatbubbleOutline, FlameOutline, TimeOutline } from '@vicons/ionicons5'
 import { commentApi } from '@/api/comment'
@@ -27,6 +27,7 @@ const page = ref(1)
 const selectedSort = ref<CommentSort>('hot')
 const loading = ref(false)
 const loadingMore = ref(false)
+const loadMoreError = ref(false)
 const mainSubmitting = ref(false)
 const activeReplyId = ref<number | null>(null)
 const replySubmittingId = ref<number | null>(null)
@@ -34,6 +35,8 @@ const replyPages = ref<Record<number, number>>({})
 const likingCommentIds = ref<number[]>([])
 const deletingCommentIds = ref<number[]>([])
 const loadingReplyIds = ref<number[]>([])
+const commentLoadMoreTriggerRef = ref<HTMLElement | null>(null)
+let commentObserver: IntersectionObserver | null = null
 
 const hasMore = computed(() => comments.value.length < total.value)
 
@@ -69,6 +72,7 @@ async function loadComments(nextPage = 1) {
   } else {
     loadingMore.value = true
   }
+  loadMoreError.value = false
 
   try {
     const result = await commentApi.getList(props.articleId, {
@@ -86,6 +90,9 @@ async function loadComments(nextPage = 1) {
       comments.value = [...comments.value, ...result.data.list]
     }
   } catch (error) {
+    if (!isFirstPage) {
+      loadMoreError.value = true
+    }
     message.error(errorMessage(error, '评论加载失败'))
   } finally {
     loading.value = false
@@ -94,17 +101,46 @@ async function loadComments(nextPage = 1) {
 }
 
 function loadMoreComments() {
-  if (loadingMore.value || !hasMore.value) {
+  if (loading.value || loadingMore.value || loadMoreError.value || !hasMore.value) {
     return
   }
 
   void loadComments(page.value + 1)
 }
 
+function retryLoadMoreComments() {
+  if (loading.value || loadingMore.value || !hasMore.value) {
+    return
+  }
+
+  void loadComments(page.value + 1)
+}
+
+function handleCommentLoadMoreIntersect(entries: IntersectionObserverEntry[]) {
+  const isVisible = entries.some((entry) => entry.isIntersecting)
+
+  if (isVisible) {
+    loadMoreComments()
+  }
+}
+
+function setupCommentLoadMoreObserver() {
+  if (typeof IntersectionObserver === 'undefined' || !commentLoadMoreTriggerRef.value) {
+    return
+  }
+
+  commentObserver?.disconnect()
+  commentObserver = new IntersectionObserver(handleCommentLoadMoreIntersect, {
+    rootMargin: '160px 0px',
+  })
+  commentObserver.observe(commentLoadMoreTriggerRef.value)
+}
+
 function changeSort(sort: CommentSort) {
   selectedSort.value = sort
   page.value = 1
   comments.value = []
+  loadMoreError.value = false
   void loadComments(1)
 }
 
@@ -253,7 +289,18 @@ async function loadMoreReplies(comment: Comment) {
 
 onMounted(() => {
   void loadComments()
+  setupCommentLoadMoreObserver()
 })
+
+onBeforeUnmount(() => {
+  commentObserver?.disconnect()
+})
+
+watch(
+  () => [hasMore.value, loading.value, loadingMore.value, loadMoreError.value, comments.value.length],
+  setupCommentLoadMoreObserver,
+  { flush: 'post' },
+)
 </script>
 
 <template>
@@ -315,15 +362,22 @@ onMounted(() => {
       </div>
     </n-spin>
 
-    <div v-if="comments.length" class="comment-load-more">
-      <n-button
-        v-if="hasMore"
-        :loading="loadingMore"
-        :disabled="loadingMore"
-        @click="loadMoreComments"
+    <div
+      v-if="comments.length || loadingMore || loadMoreError"
+      ref="commentLoadMoreTriggerRef"
+      class="comment-load-more-trigger"
+      aria-live="polite"
+    >
+      <button
+        v-if="loadMoreError"
+        class="comment-load-retry"
+        type="button"
+        @click="retryLoadMoreComments"
       >
-        加载更多
-      </n-button>
+        加载失败，点击重试
+      </button>
+      <span v-else-if="loadingMore">正在加载更多评论...</span>
+      <span v-else-if="hasMore">继续下滑查看更多评论</span>
       <span v-else>已经到底了</span>
     </div>
   </section>

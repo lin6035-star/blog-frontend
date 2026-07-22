@@ -18,6 +18,7 @@ const message = useMessage()
 
 /* ---- 表单状态 ---- */
 const loading = ref(false)
+const githubLoading = ref(false)
 const form = reactive<RegisterDTO>({
   username: '',
   nickname: '',
@@ -138,6 +139,53 @@ async function submit(e: Event) {
     setTimeout(() => { loginFail.value = false }, 800)
   } finally {
     loading.value = false
+  }
+}
+
+/* ---- GitHub OAuth 弹窗登录 ---- */
+async function handleGitHubLogin() {
+  if (githubLoading.value) return
+  githubLoading.value = true
+
+  try {
+    const result = await authApi.getGitHubAuthUrl()
+    const authUrl = result.data.url
+
+    const left = window.screenX + (window.innerWidth - 600) / 2
+    const top = window.screenY + (window.innerHeight - 700) / 2
+    const popup = window.open(
+      authUrl,
+      'github-oauth',
+      `width=600,height=700,left=${left},top=${top}`,
+    )
+
+    if (!popup) {
+      message.warning('请允许浏览器弹窗后重试')
+      return
+    }
+
+    const cleanup = (e: MessageEvent) => {
+      if (e.origin !== window.location.origin) return
+
+      if (e.data?.type === 'github-oauth-success') {
+        window.removeEventListener('message', cleanup)
+        // 弹窗已写入 localStorage，主窗口恢复登录态
+        authStore.restoreAuth()
+        loginSuccess.value = true
+        setTimeout(() => { showWipe.value = true }, 1000)
+        setTimeout(() => { router.push(String(route.query.redirect || '/')) }, 2000)
+      } else if (e.data?.type === 'github-oauth-failed') {
+        window.removeEventListener('message', cleanup)
+        message.error('GitHub 授权失败，请重试')
+      }
+    }
+
+    window.addEventListener('message', cleanup)
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : '获取授权链接失败'
+    message.error(msg)
+  } finally {
+    githubLoading.value = false
   }
 }
 </script>
@@ -275,6 +323,23 @@ async function submit(e: Event) {
             {{ loading ? '注册中…' : '注册并登录' }}
           </button>
         </form>
+
+        <!-- GitHub 登录 -->
+        <div class="login-divider anim-item d-8">
+          <span>或</span>
+        </div>
+
+        <button
+          type="button"
+          class="login-btn login-btn-github anim-item d-8"
+          :disabled="githubLoading"
+          @click="handleGitHubLogin"
+        >
+          <svg class="github-icon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z" />
+          </svg>
+          {{ githubLoading ? '跳转中…' : 'GitHub 登录' }}
+        </button>
 
         <p class="login-signup anim-item d-8">
           已有账号？

@@ -34,6 +34,47 @@ describe('home information-flow layout', () => {
     expect(home).toContain('class="feed-layout home-feed-layout"')
   })
 
+  it('mounts the hot rank card in the home right rail', () => {
+    const home = readSource('views/HomeView.vue')
+    const hotRankCard = readSource('components/article/ArticleHotRankCard.vue')
+    const css = readSource('styles/index.css')
+
+    expect(home).toContain("import ArticleHotRankCard from '@/components/article/ArticleHotRankCard.vue'")
+    expect(home).toContain('class="home-side-rail"')
+    expect(home).toContain('<ArticleHotRankCard />')
+    expect(hotRankCard).toContain('热度榜')
+    expect(hotRankCard).toContain('articleApi.getHotList({ page: 1, pageSize: 5 })')
+    expect(hotRankCard).toContain("router.push({ name: 'hot-rank' })")
+    expect(css).toContain('grid-template-columns: 180px minmax(0, 1fr) 180px')
+    expect(css).toContain('.home-side-rail')
+    expect(css).toContain('min-width: 0')
+  })
+
+  it('tightens the home first-screen vertical spacing', () => {
+    const css = readSource('styles/index.css')
+
+    expect(css).toContain('.home-feed-layout')
+    expect(css).toContain('margin-top: 0px')
+    expect(css).toContain('.home-feed-layout .feed-tabs')
+    expect(css).toContain('padding: 6px 14px')
+  })
+
+  it('defines a full hot rank page route', () => {
+    const router = readSource('router/index.ts')
+    const hotRankView = readSource('views/HotRankView.vue')
+
+    expect(router).toContain("path: '/rank/hot'")
+    expect(router).toContain("name: 'hot-rank'")
+    expect(router).toContain("meta: { title: '热度榜' }")
+    expect(hotRankView).toContain('热度榜')
+    expect(hotRankView).toContain('articleApi.getHotList')
+    expect(hotRankView).toContain('{{ article.authorName ||')
+    expect(hotRankView).toContain('{{ article.viewCount || 0 }} 浏览')
+    expect(hotRankView).toContain('{{ article.commentCount || 0 }} 评论')
+    expect(hotRankView).toContain('{{ article.favoriteCount || 0 }} 收藏')
+    expect(hotRankView).not.toContain('hotScore')
+  })
+
   it('selects a category from the left rail and passes categoryId when loading articles', () => {
     const home = readSource('views/HomeView.vue')
 
@@ -58,6 +99,26 @@ describe('home information-flow layout', () => {
     expect(feed).toContain("value: 'latest'")
     expect(feed).not.toContain('<button type="button">后端</button>')
     expect(feed).not.toContain('<button type="button">前端</button>')
+  })
+
+  it('loads more home articles by infinite scroll instead of page buttons', () => {
+    const home = readSource('views/HomeView.vue')
+    const feed = readSource('components/article/ArticleFeed.vue')
+
+    expect(home).toContain('const loadingMore = ref(false)')
+    expect(home).toContain('const hasMore = computed(() => articles.value.length < totalArticles.value)')
+    expect(home).toContain('async function loadArticles(nextPage = 1)')
+    expect(home).toContain('const isFirstPage = nextPage === 1')
+    expect(home).toContain('articles.value = isFirstPage ? list : [...articles.value, ...list]')
+    expect(home).toContain('function loadMoreArticles()')
+    expect(home).toContain('@load-more="loadMoreArticles"')
+    expect(feed).toContain('loadMore: []')
+    expect(feed).toContain('const loadMoreTriggerRef = ref<HTMLElement | null>(null)')
+    expect(feed).toContain('new IntersectionObserver')
+    expect(feed).toContain("emit('loadMore')")
+    expect(feed).toContain('class="feed-load-more-trigger"')
+    expect(feed).not.toContain('<n-pagination')
+    expect(feed).not.toContain("'page-change'")
   })
 
   it('shows article author nickname and category tag in the card meta row', () => {
@@ -197,5 +258,27 @@ describe('home information-flow layout', () => {
 
     expect(detail).not.toContain('{{ article.summary }}')
     expect(detail).toContain('请返回首页查看其他公开文章。')
+  })
+
+  it('adds a sticky author card and content outline to the article detail right rail', () => {
+    const detail = readSource('views/ArticleDetailView.vue')
+    const css = readSource('styles/index.css')
+
+    expect(detail).toContain("import { renderArticleWithOutline } from '@/utils/articleOutline'")
+    expect(detail).toContain('renderedArticle.value.outline')
+    expect(detail).toContain('class="detail-right-rail"')
+    expect(detail).toContain('class="detail-author-card"')
+    expect(detail).toContain('class="detail-outline-card"')
+    expect(detail).toContain('内容纲要')
+    expect(detail).toContain('@click="scrollToOutlineItem(item.id)"')
+    expect(detail).toContain('关注')
+    expect(detail).toContain('私信')
+
+    expect(css).toContain('grid-template-columns: 56px minmax(0, 1fr) 260px')
+    expect(css).toContain('.detail-right-rail')
+    expect(css).toContain('position: sticky')
+    expect(css).toContain('.detail-author-card')
+    expect(css).toContain('.detail-outline-card')
+    expect(css).toContain('scroll-margin-top: 92px')
   })
 })

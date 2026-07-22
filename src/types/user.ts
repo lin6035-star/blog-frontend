@@ -4,6 +4,8 @@ export interface UsersVO {
   nickname: string
   avatarUrl: string
   bio: string
+  followersCount: number
+  followingCount: number
   createdAt: string
 }
 

@@ -9,6 +9,8 @@ const user: UsersVO = {
   nickname: '海林',
   avatarUrl: '',
   bio: 'Java learner',
+  followersCount: 0,
+  followingCount: 0,
   createdAt: '2026-07-03T10:00:00',
 }
 

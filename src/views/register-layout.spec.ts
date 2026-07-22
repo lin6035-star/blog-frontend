@@ -12,4 +12,15 @@ describe('register page compact layout', () => {
     expect(loginCss).toContain('.register-page .login-right')
     expect(loginCss).toContain('.register-page .login-star')
   })
+
+  it('keeps the register footer visible after adding GitHub login', () => {
+    expect(registerView).toContain('class="login-btn login-btn-github')
+    expect(registerView).toContain('已有账号？')
+    expect(loginCss).toContain('.register-page .login-divider')
+    expect(loginCss).toContain('.register-page .login-btn-github')
+    expect(loginCss).toContain('.register-page .login-signup')
+    expect(loginCss).toContain('max-height: calc(100vh - 48px)')
+    expect(loginCss).toContain('overflow-y: auto')
+    expect(loginCss).toContain('min-height: 46px')
+  })
 })

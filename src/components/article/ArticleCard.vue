@@ -16,8 +16,10 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  open: [article: Article]
   like: [article: Article]
   favorite: [article: Article]
+  'author-click': [authorId: number]
 }>()
 
 const authorDisplayName = computed(() =>
@@ -27,10 +29,22 @@ const authorDisplayName = computed(() =>
 
 <template>
   <article class="article-card">
-    <router-link class="article-link" :to="`/articles/${article.id}`">
+    <div
+      class="article-link"
+      role="link"
+      tabindex="0"
+      @click="emit('open', article)"
+      @keydown.enter="emit('open', article)"
+    >
       <div class="article-main">
         <div class="article-meta">
-          <span>作者：{{ authorDisplayName }}</span>
+          <button
+            class="article-author-link"
+            type="button"
+            @click.prevent.stop="emit('author-click', article.authorId)"
+          >
+            作者：{{ authorDisplayName }}
+          </button>
           <span>{{ formatArticleDate(article.publishedAt) }}</span>
           <span v-if="article.categoryName" class="article-category-tag">
             #{{ article.categoryName }}
@@ -79,6 +93,6 @@ const authorDisplayName = computed(() =>
         :src="article.coverUrl"
         alt=""
       />
-    </router-link>
+    </div>
   </article>
 </template>

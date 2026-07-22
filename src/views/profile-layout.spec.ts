@@ -5,21 +5,25 @@ import { describe, expect, it } from 'vitest'
 const profileView = readFileSync(resolve(__dirname, 'ProfileView.vue'), 'utf8')
 
 describe('profile article tabs layout', () => {
-  it('shows four profile tabs and defaults to published articles', () => {
+  it('shows six profile tabs and defaults to published articles', () => {
     expect(profileView).toContain("activeTab = ref<ProfileTabKey>('published')")
     expect(profileView).toContain("key: 'published'")
     expect(profileView).toContain("label: '我发布的'")
     expect(profileView).toContain("label: '我喜欢的'")
     expect(profileView).toContain("label: '我收藏的'")
     expect(profileView).toContain("label: '我评论的'")
+    expect(profileView).toContain("label: '我关注的'")
+    expect(profileView).toContain("label: '关注我的'")
   })
 
-  it('loads article tabs from the corresponding profile endpoints', () => {
+  it('loads article and relation tabs from the corresponding endpoints', () => {
     expect(profileView).toContain('const pageSize = 2')
     expect(profileView).toContain('myArticleApi.getList(page, pageSize)')
     expect(profileView).toContain('myArticleApi.getLiked(page, pageSize)')
     expect(profileView).toContain('myArticleApi.getFavorited(page, pageSize)')
     expect(profileView).toContain('myArticleApi.getCommented(page, pageSize)')
+    expect(profileView).toContain("publicUserApi.getFollowing(user.value!.id, page, pageSize)")
+    expect(profileView).toContain("publicUserApi.getFollowers(user.value!.id, page, pageSize)")
     expect(profileView).toContain('loadArticlesForTab(key, 1)')
     expect(profileView).not.toContain('profile-placeholder-panel')
     expect(profileView).not.toContain('这个模块的后端接口还没接入')
@@ -94,6 +98,8 @@ describe('profile article tabs layout', () => {
     expect(profileView).toContain('formatArticleDate(user.value.createdAt)')
     expect(profileView).toContain('关注了')
     expect(profileView).toContain('关注者')
+    expect(profileView).toContain('user?.followingCount')
+    expect(profileView).toContain('user?.followersCount')
     expect(profileView).toContain('加入于')
     expect(profileView).toContain('{{ joinedAtText }}')
   })
