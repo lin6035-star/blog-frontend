@@ -5,6 +5,7 @@ import { useDialog, useMessage } from 'naive-ui'
 import { ArrowBack } from '@vicons/ionicons5'
 import { MdEditor } from 'md-editor-v3'
 import 'md-editor-v3/lib/style.css'
+import MainLayout from '@/layouts/MainLayout.vue'
 import { categoryApi } from '@/api/category'
 import { myArticleApi, type ArticleForm } from '@/api/myArticle'
 import { ARTICLE_STATUS, type ArticleStatus } from '@/constants/articleStatus'
@@ -268,7 +269,8 @@ onBeforeRouteLeave((_to, _from, next) => {
 </script>
 
 <template>
-  <div class="editor-page">
+  <MainLayout>
+    <div class="editor-page">
     <!-- 顶部工具栏 -->
     <header class="editor-toolbar">
       <button class="editor-back" type="button" @click="handleBack">
@@ -352,6 +354,7 @@ onBeforeRouteLeave((_to, _from, next) => {
       />
     </div>
   </div>
+  </MainLayout>
 </template>
 
 <style scoped>

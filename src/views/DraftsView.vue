@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useDialog, useMessage } from 'naive-ui'
 import { ArrowBack, CreateOutline, TrashOutline } from '@vicons/ionicons5'
+import MainLayout from '@/layouts/MainLayout.vue'
 import { myArticleApi } from '@/api/myArticle'
 import { ARTICLE_STATUS } from '@/constants/articleStatus'
 import type { Article } from '@/types/article'
@@ -85,7 +86,8 @@ onMounted(loadDrafts)
 </script>
 
 <template>
-  <div class="drafts-page">
+  <MainLayout>
+    <div class="drafts-page">
     <!-- 顶部 -->
     <header class="drafts-header">
       <button class="drafts-back" type="button" @click="router.back()">
@@ -158,6 +160,7 @@ onMounted(loadDrafts)
       />
     </div>
   </div>
+  </MainLayout>
 </template>
 
 <style scoped>
