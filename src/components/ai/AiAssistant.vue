@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   Add,
   ArrowBack,
@@ -16,7 +16,9 @@ import {
 } from '@vicons/ionicons5'
 import { useMessage } from 'naive-ui'
 import { aiApi } from '@/api/ai'
-import type { AiMessage, AiSession, PageContext } from '@/api/ai'
+import type { AiMessage, AiSession, PageContext, EditorAction, ArticleAction } from '@/api/ai'
+import { emitAiEditorAction } from '@/utils/aiEditorBus'
+import { emitAiArticleAction } from '@/utils/aiArticleActionBus'
 import { renderMarkdown } from '@/utils/markdown'
 
 import { useAuthStore } from '@/stores/auth'
@@ -27,6 +29,7 @@ import { useAuthStore } from '@/stores/auth'
 
 const authStore = useAuthStore()
 const route = useRoute()
+const router = useRouter()
 const message = useMessage()
 
 const userAvatar = computed(() => authStore.usersVO?.avatarUrl ?? null)
@@ -112,6 +115,144 @@ const messages = ref<AiMessage[]>([])
 let abortController: AbortController | null = null
 
 // ============================================================
+// 拖拽移动
+// ============================================================
+
+const isDragging = ref(false)
+const dragStart = ref({ mouseX: 0, mouseY: 0, panelX: 0, panelY: 0 })
+const panelOffset = ref({ x: 0, y: 0 })
+
+function onHeaderMouseDown(e: MouseEvent) {
+  // 不拦截按钮点击
+  const target = e.target as HTMLElement
+  if (target.closest('button')) return
+
+  isDragging.value = true
+  dragStart.value = {
+    mouseX: e.clientX,
+    mouseY: e.clientY,
+    panelX: panelOffset.value.x,
+    panelY: panelOffset.value.y,
+  }
+  document.addEventListener('mousemove', onMouseMove)
+  document.addEventListener('mouseup', onMouseUp)
+}
+
+// 面板顶部不得越过 header（header sticky 64px + 安全间距 8px = 72px）
+function clampPanelTop(yOffset: number): number {
+  // 面板顶部 = 视口高度 - 120(bottom) - 面板高度 + yOffset
+  // 约束：面板顶部 >= 72px
+  const top = window.innerHeight - 120 - panelH.value + yOffset
+  if (top < 72) return yOffset + (72 - top)
+  return yOffset
+}
+
+function onMouseMove(e: MouseEvent) {
+  if (!isDragging.value) return
+  const rawY = dragStart.value.panelY + (e.clientY - dragStart.value.mouseY)
+  panelOffset.value = {
+    x: dragStart.value.panelX + (e.clientX - dragStart.value.mouseX),
+    y: clampPanelTop(rawY),
+  }
+}
+
+function onMouseUp() {
+  isDragging.value = false
+  document.removeEventListener('mousemove', onMouseMove)
+  document.removeEventListener('mouseup', onMouseUp)
+}
+
+const panelStyle = computed(() => {
+  const tx = panelOffset.value.x + resizeOffset.value.x
+  const ty = panelOffset.value.y + resizeOffset.value.y
+  const style: Record<string, string> = {}
+  if (tx !== 0 || ty !== 0) style.transform = `translate(${tx}px, ${ty}px)`
+  if (panelW.value !== 420) style.width = `${panelW.value}px`
+  if (panelH.value !== 560) style.height = `${panelH.value}px`
+  return Object.keys(style).length > 0 ? style : undefined
+})
+
+// ============================================================
+// 边缘缩放
+// ============================================================
+
+type ResizeDir = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
+
+const resizing = ref<ResizeDir | null>(null)
+const panelW = ref(420)
+const panelH = ref(560)
+const resizeOffset = ref({ x: 0, y: 0 })
+let resizeStart = { mx: 0, my: 0, w: 0, h: 0, ox: 0, oy: 0 }
+
+const MIN_W = 360
+const MIN_H = 400
+
+function maxW() { return window.innerWidth - 48 }
+function maxH() { return window.innerHeight - 140 }
+
+function onResizeStart(e: MouseEvent, dir: ResizeDir) {
+  e.preventDefault()
+  e.stopPropagation()
+  resizing.value = dir
+  resizeStart = {
+    mx: e.clientX, my: e.clientY,
+    w: panelW.value, h: panelH.value,
+    ox: resizeOffset.value.x, oy: resizeOffset.value.y,
+  }
+  document.addEventListener('mousemove', onResizeMove)
+  document.addEventListener('mouseup', onResizeEnd)
+}
+
+function onResizeMove(e: MouseEvent) {
+  if (!resizing.value) return
+  const d = resizing.value
+  const dx = e.clientX - resizeStart.mx
+  const dy = e.clientY - resizeStart.my
+
+  let newW = resizeStart.w, newH = resizeStart.h
+  let ox = resizeStart.ox, oy = resizeStart.oy
+
+  // 东/西：宽度变化以固定对边
+  if (d.includes('e')) {
+    // 拖右边 → 宽度 = 原始 + dx，左边缘不动 → 面板跟随右移
+    const w = resizeStart.w + dx
+    if (w >= MIN_W && w <= maxW()) { newW = w; ox = resizeStart.ox + dx }
+  }
+  if (d.includes('w')) {
+    // 拖左边 → 宽度 = 原始 - dx，右边缘不动 → 面板跟随左移
+    const w = resizeStart.w - dx
+    if (w >= MIN_W && w <= maxW()) { newW = w; ox = resizeStart.ox + dx }
+  }
+
+  // 南/北：高度变化以固定对边
+  if (d.includes('s')) {
+    // 拖下边 → 高度 = 原始 + dy，上边缘不动 → 面板跟随下移
+    const h = resizeStart.h + dy
+    if (h >= MIN_H && h <= maxH()) { newH = h; oy = resizeStart.oy + dy }
+  }
+  if (d.includes('n')) {
+    // 拖上边 → 高度 = 原始 - dy，下边缘不动 → 面板跟随上移
+    // 约束：面板顶部不得越过 header（72px）
+    const h = resizeStart.h - dy
+    let candidateOy = resizeStart.oy + dy
+    // 计算面板顶部位置
+    const top = window.innerHeight - 120 - h + candidateOy
+    if (top < 72) candidateOy += (72 - top)
+    if (h >= MIN_H && h <= maxH()) { newH = h; oy = candidateOy }
+  }
+
+  panelW.value = newW
+  panelH.value = newH
+  resizeOffset.value = { x: ox, y: oy }
+}
+
+function onResizeEnd() {
+  resizing.value = null
+  document.removeEventListener('mousemove', onResizeMove)
+  document.removeEventListener('mouseup', onResizeEnd)
+}
+
+// ============================================================
 // Derived
 // ============================================================
 
@@ -191,6 +332,11 @@ async function toggle() {
 
 function toggleFullscreen() {
   isFullscreen.value = !isFullscreen.value
+  // 切换全屏时重置拖拽和缩放
+  panelOffset.value = { x: 0, y: 0 }
+  resizeOffset.value = { x: 0, y: 0 }
+  panelW.value = 420
+  panelH.value = 560
 }
 
 function openHistory() {
@@ -232,6 +378,108 @@ async function deleteSession(sid: string) {
     }
   } catch {
     message.error('删除失败')
+  }
+}
+
+// 导航路由映射（AI 导航 tool 调用后触发）
+const NAV_ROUTES: Record<string, string> = {
+  home: '/',
+  profile: '/me',
+  editor: '/editor',
+  drafts: '/drafts',
+  hotRank: '/rank/hot',
+}
+
+async function handleNavigate(navigate?: { target: string; param?: string }) {
+  if (!navigate) return
+  const { target, param } = navigate
+
+  let path = ''
+  if (target === 'article' && param) {
+    path = `/articles/${param}`
+  } else if (target === 'userProfile' && param) {
+    path = `/users/${param}`
+  } else if (NAV_ROUTES[target]) {
+    path = NAV_ROUTES[target]
+  }
+
+  if (!path) {
+    message.warning('AI 已识别跳转意图，但缺少目标参数')
+    return
+  }
+
+  if (router.currentRoute.value.path === path) {
+    message.info('已经在目标页面了')
+    return
+  }
+
+  try {
+    const failure = await router.push(path)
+    if (failure) {
+      message.warning('跳转失败，请检查是否需要登录')
+    }
+  } catch {
+    message.warning('跳转失败，请检查是否需要登录')
+  }
+}
+
+async function handleEditorAction(action: EditorAction) {
+  const routeName = String(router.currentRoute.value.name ?? '')
+  const inEditor = routeName === 'editor-new' || routeName === 'editor-edit'
+
+  if (action.type === 'fillArticle') {
+    if (!inEditor) {
+      await router.push('/editor')
+      await nextTick()
+    }
+    emitAiEditorAction(action)
+    message.success('已填入编辑器')
+    return
+  }
+
+  if (action.type === 'saveDraft' || action.type === 'publish') {
+    if (!inEditor) {
+      message.warning('请先进入写文章页面，再让 AI 保存或发布')
+      return
+    }
+
+    emitAiEditorAction(action)
+  }
+}
+
+async function handleArticleAction(action: ArticleAction) {
+  if (router.currentRoute.value.name !== 'article-detail') {
+    message.warning('请先打开具体文章，再让 AI 点赞')
+    return
+  }
+
+  emitAiArticleAction(action)
+}
+
+function extractLegacyNavigate(content: string): { cleanContent: string; navigate?: { target: string; param?: string } } {
+  const match = content.match(/\[BLOGNAV:([a-zA-Z]+)(?::(\d+))?\]/)
+  if (!match) {
+    return { cleanContent: content }
+  }
+
+  const legacyTargetMap: Record<string, string> = {
+    goToHome: 'home',
+    goToProfile: 'profile',
+    goToEditor: 'editor',
+    goToDrafts: 'drafts',
+    goToHotRank: 'hotRank',
+    goToArticle: 'article',
+    goToUserProfile: 'userProfile',
+  }
+
+  const rawTarget = match[1]
+  const target = legacyTargetMap[rawTarget] ?? rawTarget
+  return {
+    cleanContent: content.replace(match[0], '').trim(),
+    navigate: {
+      target,
+      param: match[2],
+    },
   }
 }
 
@@ -305,8 +553,15 @@ async function send(text?: string, skipUserMessage = false) {
         await nextTick()
         scrollToBottom()
       },
-      onStop(session, assistantMessage) {
+      async onStop(session, assistantMessage, navigate, editorAction, articleAction) {
         abortController = null
+        const legacyNavigate = extractLegacyNavigate(assistantMessage.content)
+        assistantMessage = {
+          ...assistantMessage,
+          content: legacyNavigate.cleanContent,
+        }
+        navigate = navigate ?? legacyNavigate.navigate
+
         // 用后端返回的完整数据替换 AI 占位
         let idx = -1
         for (let i = messages.value.length - 1; i >= 0; i--) {
@@ -334,6 +589,13 @@ async function send(text?: string, skipUserMessage = false) {
 
         sending.value = false
         scrollToBottom()
+        handleNavigate(navigate)
+        if (editorAction) {
+          await handleEditorAction(editorAction)
+        }
+        if (articleAction) {
+          await handleArticleAction(articleAction)
+        }
       },
       onError(error) {
         abortController = null
@@ -445,9 +707,13 @@ watch(visible, async (v) => {
     <!-- ============================================================ -->
     <!-- 聊天面板 -->
     <!-- ============================================================ -->
-    <div v-if="visible" class="ai-panel">
-      <!-- 顶部栏 -->
-      <header class="ai-panel-header">
+    <div v-if="visible" class="ai-panel" :class="{ 'is-dragging': isDragging }" :style="panelStyle">
+      <!-- 顶部栏（可拖拽） -->
+      <header
+        class="ai-panel-header"
+        :class="{ dragging: isDragging }"
+        @mousedown="onHeaderMouseDown"
+      >
         <div class="ai-panel-title">
           <span class="ai-panel-emoji">🤖</span>
           <span>海林BlogAI助手</span>
@@ -649,6 +915,16 @@ watch(visible, async (v) => {
           </button>
         </footer>
       </template>
+
+      <!-- 边缘缩放手柄 -->
+      <div class="ai-resize-h resize-n" @mousedown="onResizeStart($event, 'n')" />
+      <div class="ai-resize-h resize-s" @mousedown="onResizeStart($event, 's')" />
+      <div class="ai-resize-h resize-e" @mousedown="onResizeStart($event, 'e')" />
+      <div class="ai-resize-h resize-w" @mousedown="onResizeStart($event, 'w')" />
+      <div class="ai-resize-h resize-ne" @mousedown="onResizeStart($event, 'ne')" />
+      <div class="ai-resize-h resize-nw" @mousedown="onResizeStart($event, 'nw')" />
+      <div class="ai-resize-h resize-se" @mousedown="onResizeStart($event, 'se')" />
+      <div class="ai-resize-h resize-sw" @mousedown="onResizeStart($event, 'sw')" />
     </div>
   </div>
 </template>
@@ -699,6 +975,10 @@ watch(visible, async (v) => {
 .ai-panel {
   width: 420px;
   height: 560px;
+  min-width: 360px;
+  min-height: 400px;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 140px); /* 120px(bottom) + 20px 保险，避免盖住顶部 header */
   border-radius: 12px;
   background: #fff;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.12);
@@ -707,6 +987,11 @@ watch(visible, async (v) => {
   overflow: hidden;
   animation: ai-panel-in 0.24s ease-out;
   transition: width 0.3s, height 0.3s;
+}
+
+/* 拖拽中禁用动画 */
+.ai-panel.is-dragging {
+  transition: none;
 }
 
 /* 全屏：容器铺满视口，面板 100% 填充 */
@@ -720,6 +1005,15 @@ watch(visible, async (v) => {
 .ai-assistant.fullscreen .ai-panel {
   width: 100%;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+}
+
+/* 全屏隐藏缩放手柄 */
+.ai-assistant.fullscreen .ai-resize-h {
+  display: none;
 }
 
 @keyframes ai-panel-in {
@@ -746,6 +1040,12 @@ watch(visible, async (v) => {
   background: #fbfdfc;
   flex-shrink: 0;
   gap: 8px;
+  cursor: grab;
+  user-select: none;
+}
+
+.ai-panel-header.dragging {
+  cursor: grabbing;
 }
 
 .ai-panel-title {
@@ -1385,6 +1685,27 @@ watch(visible, async (v) => {
 .ai-guest-limit-login:hover {
   background: #25595d;
 }
+
+/* ============================================================
+   Resize handles（边缘缩放）
+   ============================================================ */
+
+.ai-resize-h {
+  position: absolute;
+  z-index: 10;
+}
+
+/* 四边 */
+.resize-n { top: 0; left: 8px; right: 8px; height: 6px; cursor: ns-resize; }
+.resize-s { bottom: 0; left: 8px; right: 8px; height: 6px; cursor: ns-resize; }
+.resize-e { right: 0; top: 8px; bottom: 8px; width: 6px; cursor: ew-resize; }
+.resize-w { left: 0; top: 8px; bottom: 8px; width: 6px; cursor: ew-resize; }
+
+/* 四角 */
+.resize-ne { top: 0; right: 0; width: 14px; height: 14px; cursor: nesw-resize; }
+.resize-nw { top: 0; left: 0; width: 14px; height: 14px; cursor: nwse-resize; }
+.resize-se { bottom: 0; right: 0; width: 14px; height: 14px; cursor: nwse-resize; }
+.resize-sw { bottom: 0; left: 0; width: 14px; height: 14px; cursor: nesw-resize; }
 
 /* ============================================================
    Responsive

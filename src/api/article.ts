@@ -34,4 +34,7 @@ export const articleApi = {
   unfavorite(articleId: number) {
     return request.delete(`/articles/${articleId}/favorite`)
   },
+  share(articleId: number | string) {
+    return request.post(`/articles/${articleId}/share`)
+  },
 }

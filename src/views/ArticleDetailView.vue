@@ -9,12 +9,15 @@ import {
   HeartOutline,
   Star,
   StarOutline,
+  ShareSocialOutline,
 } from '@vicons/ionicons5'
 import { articleApi } from '@/api/article'
+import type { ArticleAction } from '@/api/ai'
 import { publicUserApi } from '@/api/publicUser'
 import { useLoginGuard } from '@/composables/useLoginGuard'
 import CommentSection from '@/components/comment/CommentSection.vue'
 import MainLayout from '@/layouts/MainLayout.vue'
+import { registerAiArticleActionHandler, unregisterAiArticleActionHandler } from '@/utils/aiArticleActionBus'
 import type { Article } from '@/types/article'
 import type { PublicUserInfo } from '@/types/publicUser'
 import { formatArticleDateTime } from '@/utils/format'
@@ -30,6 +33,7 @@ const liked = ref(false)
 const favorited = ref(false)
 const likeCount = ref(0)
 const favoriteCount = ref(0)
+const shareCount = ref(0)
 const liking = ref(false)
 const favoriting = ref(false)
 const authorProfile = ref<PublicUserInfo | null>(null)
@@ -78,6 +82,7 @@ async function loadArticle() {
     favorited.value = result.data.favorited === 1
     likeCount.value = result.data.likeCount || 0
     favoriteCount.value = result.data.favoriteCount || 0
+    shareCount.value = result.data.shareCount || 0
     loadAuthorProfile()
   } catch (error) {
     const msg = error instanceof Error ? error.message : '文章加载失败'
@@ -148,6 +153,92 @@ async function handleLike() {
   }
 }
 
+async function handleAiArticleAction(action: ArticleAction) {
+  if (!article.value) return
+
+  // 评论由 CommentSection 处理，本组件不处理
+  if (action.type === 'commentArticle') return
+
+  if (String(article.value.id) !== String(action.articleId)) {
+    message.warning('AI 操作的文章与当前文章不一致')
+    return
+  }
+
+  if (action.type === 'copyArticleLink') {
+    await copyCurrentArticleLink()
+    return
+  }
+
+  if (action.type === 'followAuthor') {
+    if (!authorProfile.value) {
+      message.warning('作者信息还没加载完成')
+      return
+    }
+    if (authorProfile.value.self) {
+      message.warning('不能关注自己')
+      return
+    }
+    if (authorProfile.value.followed) {
+      message.info('你已经关注过这个作者了')
+      return
+    }
+    await handleAuthorFollow()
+    return
+  }
+
+  if (action.type === 'unfollowAuthor') {
+    if (!authorProfile.value) {
+      message.warning('作者信息还没加载完成')
+      return
+    }
+    if (authorProfile.value.self) {
+      message.warning('不能取消关注自己')
+      return
+    }
+    if (!authorProfile.value.followed) {
+      message.info('你还没有关注这个作者')
+      return
+    }
+    await handleAuthorFollow()
+    return
+  }
+
+  if (action.type === 'likeArticle') {
+    if (liked.value) {
+      message.info('你已经点赞过这篇文章了')
+      return
+    }
+    await handleLike()
+    return
+  }
+
+  if (action.type === 'unlikeArticle') {
+    if (!liked.value) {
+      message.info('你还没有点赞这篇文章')
+      return
+    }
+    await handleLike()
+    return
+  }
+
+  if (action.type === 'favoriteArticle') {
+    if (favorited.value) {
+      message.info('你已经收藏过这篇文章了')
+      return
+    }
+    await handleFavorite()
+    return
+  }
+
+  if (action.type === 'unfavoriteArticle') {
+    if (!favorited.value) {
+      message.info('你还没有收藏这篇文章')
+      return
+    }
+    await handleFavorite()
+  }
+}
+
 async function handleFavorite() {
   if (favoriting.value) return
   if (!requireLogin()) return
@@ -168,6 +259,38 @@ async function handleFavorite() {
     message.error(error instanceof Error ? error.message : '操作失败')
   } finally {
     favoriting.value = false
+  }
+}
+
+async function copyCurrentArticleLink() {
+  if (!article.value) return
+
+  // 复制链接（Clipboard API 要求 HTTPS 或 localhost，否则降级到 execCommand）
+  try {
+    await navigator.clipboard.writeText(window.location.href)
+  } catch {
+    try {
+      const textarea = document.createElement('textarea')
+      textarea.value = window.location.href
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+    } catch {
+      message.error('分享失败，请手动复制地址栏链接')
+      return
+    }
+  }
+
+  // 通知后端记录分享（链接已复制，后端失败不影响提示）
+  message.success('文章链接已复制')
+  try {
+    await articleApi.share(article.value.id)
+    shareCount.value++
+  } catch {
+    // 后端接口暂未就绪时静默忽略
   }
 }
 
@@ -201,11 +324,13 @@ onMounted(() => {
   nextTick(updateDetailBackBarStuck)
   window.addEventListener('scroll', updateDetailBackBarStuck, { passive: true })
   window.addEventListener('resize', updateDetailBackBarStuck)
+  registerAiArticleActionHandler(handleAiArticleAction)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('scroll', updateDetailBackBarStuck)
   window.removeEventListener('resize', updateDetailBackBarStuck)
+  unregisterAiArticleActionHandler(handleAiArticleAction)
 })
 </script>
 
@@ -249,6 +374,16 @@ onBeforeUnmount(() => {
             <StarOutline v-else />
           </n-icon>
           <span>{{ favoriteCount || 0 }}</span>
+        </button>
+        <button
+          class="detail-action-btn share"
+          type="button"
+          @click="copyCurrentArticleLink"
+        >
+          <n-icon size="22">
+            <ShareSocialOutline />
+          </n-icon>
+          <span>{{ shareCount || 0 }}</span>
         </button>
       </aside>
 

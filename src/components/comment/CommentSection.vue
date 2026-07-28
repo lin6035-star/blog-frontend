@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import { useDialog, useMessage } from 'naive-ui'
 import { ChatbubbleOutline, FlameOutline, TimeOutline } from '@vicons/ionicons5'
 import { commentApi } from '@/api/comment'
+import type { ArticleAction } from '@/api/ai'
+import { registerAiArticleActionHandler, unregisterAiArticleActionHandler } from '@/utils/aiArticleActionBus'
 import { useAuthStore } from '@/stores/auth'
 import type { Comment, CommentSort } from '@/types/comment'
 import CommentEditor from './CommentEditor.vue'
@@ -36,6 +38,7 @@ const likingCommentIds = ref<number[]>([])
 const deletingCommentIds = ref<number[]>([])
 const loadingReplyIds = ref<number[]>([])
 const commentLoadMoreTriggerRef = ref<HTMLElement | null>(null)
+const sectionRef = ref<HTMLElement | null>(null)
 let commentObserver: IntersectionObserver | null = null
 
 const hasMore = computed(() => comments.value.length < total.value)
@@ -171,6 +174,35 @@ async function handleMainSubmit(content: string) {
   }
 }
 
+async function handleAiArticleAction(action: ArticleAction) {
+  if (action.type === 'scrollToComments') {
+    if (String(action.articleId) !== String(props.articleId)) return
+
+    sectionRef.value?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    })
+
+    return
+  }
+
+  if (action.type !== 'commentArticle') return
+
+  if (!authStore.isLoggedIn) {
+    message.warning('请先登录后再评论')
+    return
+  }
+
+  if (String(action.articleId) !== String(props.articleId)) return
+
+  if (!action.content?.trim()) {
+    message.warning('AI 没有生成评论内容')
+    return
+  }
+
+  await handleMainSubmit(action.content)
+}
+
 function toggleReply(comment: Comment) {
   if (!authStore.isLoggedIn) {
     showLoginTip()
@@ -290,10 +322,12 @@ async function loadMoreReplies(comment: Comment) {
 onMounted(() => {
   void loadComments()
   setupCommentLoadMoreObserver()
+  registerAiArticleActionHandler(handleAiArticleAction)
 })
 
 onBeforeUnmount(() => {
   commentObserver?.disconnect()
+  unregisterAiArticleActionHandler(handleAiArticleAction)
 })
 
 watch(
@@ -304,7 +338,11 @@ watch(
 </script>
 
 <template>
-  <section class="comment-section" aria-labelledby="comment-section-title">
+  <section
+    ref="sectionRef"
+    class="comment-section"
+    aria-labelledby="comment-section-title"
+  >
     <div class="comment-section-header">
       <div>
         <p class="eyebrow">DISCUSSION</p>

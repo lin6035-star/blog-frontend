@@ -11,6 +11,8 @@ import { myArticleApi, type ArticleForm } from '@/api/myArticle'
 import { ARTICLE_STATUS, type ArticleStatus } from '@/constants/articleStatus'
 import { extractArticleSummary } from '@/utils/articleSummary'
 import type { Category } from '@/types/category'
+import { registerAiEditorHandler, unregisterAiEditorHandler } from '@/utils/aiEditorBus'
+import type { EditorAction } from '@/api/ai'
 
 const router = useRouter()
 const route = useRoute()
@@ -162,6 +164,39 @@ async function saveArticle(
 }
 
 /* ---- 保存草稿 ---- */
+async function handleAiEditorAction(action: EditorAction) {
+  if (action.type === 'fillArticle') {
+    if (action.title) form.title = action.title
+    if (action.content) form.content = action.content
+    if (action.summary) form.summary = action.summary
+
+    if (action.categoryName) {
+      const matched = categories.value.find((c) => c.name === action.categoryName)
+      if (matched) {
+        form.categoryId = matched.id
+      }
+    }
+
+    message.success('AI 已填充文章草稿')
+    return
+  }
+
+  if (action.type === 'saveDraft') {
+    await (isEditingPublished.value ? handleSavePublishedChange() : handleSaveDraft())
+    return
+  }
+
+  if (action.type === 'publish') {
+    dialog.warning({
+      title: '确认发布',
+      content: 'AI 请求发布当前文章，确认发布吗？',
+      positiveText: '发布',
+      negativeText: '取消',
+      onPositiveClick: () => handlePublish(),
+    })
+  }
+}
+
 async function handleSaveDraft() {
   if (isEditingPublished.value) {
     message.warning('已发布文章不能保存为草稿')
@@ -199,6 +234,7 @@ function onKeydown(e: KeyboardEvent) {
 /* ---- 生命周期 ---- */
 onMounted(async () => {
   document.addEventListener('keydown', onKeydown)
+  registerAiEditorHandler(handleAiEditorAction)
 
   // 加载分类
   try {
@@ -230,6 +266,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', onKeydown)
+  unregisterAiEditorHandler(handleAiEditorAction)
 })
 
 /* ---- 路由离开守卫 ---- */

@@ -13,6 +13,7 @@ export interface Article {
   commentCount?: number
   likeCount?: number
   favoriteCount?: number
+  shareCount?: number
   liked?: number
   favorited?: number
   publishedAt: string

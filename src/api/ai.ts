@@ -21,10 +21,41 @@ export interface AiMessage {
   createdAt: string
 }
 
+export interface NavigateCommand {
+  target: string
+  param?: string
+}
+
+export interface EditorAction {
+  type: 'fillArticle' | 'saveDraft' | 'publish'
+  title?: string
+  categoryName?: string
+  summary?: string
+  content?: string
+}
+
+export interface ArticleAction {
+  type:
+    | 'likeArticle'
+    | 'unlikeArticle'
+    | 'favoriteArticle'
+    | 'unfavoriteArticle'
+    | 'commentArticle'
+    | 'scrollToComments'
+    | 'copyArticleLink'
+    | 'followAuthor'
+    | 'unfollowAuthor'
+  articleId?: string
+  content?: string
+}
+
 export interface AiChatResult {
   session: AiSession
   userMessage: AiMessage
   assistantMessage: AiMessage
+  navigate?: NavigateCommand
+  editorAction?: EditorAction
+  articleAction?: ArticleAction
 }
 
 export interface PageContext {
@@ -38,7 +69,7 @@ export interface PageContext {
 export interface StreamCallbacks {
   onParam: (session: AiSession, userMessage: AiMessage) => void
   onData: (chunk: string) => Promise<void> | void
-  onStop: (session: AiSession, assistantMessage: AiMessage) => void
+  onStop: (session: AiSession, assistantMessage: AiMessage, navigate?: NavigateCommand, editorAction?: EditorAction, articleAction?: ArticleAction) => void
   onError: (error: Error) => void
   /** 用户主动停止生成，前端自行处理（保留已输出内容） */
   onAbort?: () => void
@@ -68,6 +99,9 @@ interface AiChatResultRaw {
   session: AiSessionRaw
   userMessage: AiMessageRaw
   assistantMessage: AiMessageRaw
+  navigate?: NavigateCommand
+  editorAction?: EditorAction
+  articleAction?: ArticleAction
 }
 
 // ============================================================
@@ -86,6 +120,9 @@ function mapChatResult(raw: AiChatResultRaw): AiChatResult {
     session: raw.session,
     userMessage: mapMessage(raw.userMessage),
     assistantMessage: mapMessage(raw.assistantMessage),
+    navigate: raw.navigate,
+    editorAction: raw.editorAction,
+    articleAction: raw.articleAction,
   }
 }
 
@@ -189,8 +226,11 @@ async function streamChat(
             const data = event.eventData as {
               session: AiSessionRaw
               assistantMessage: AiMessageRaw
+              navigate?: NavigateCommand
+              editorAction?: EditorAction
+              articleAction?: ArticleAction
             }
-            callbacks.onStop(data.session, mapMessage(data.assistantMessage))
+            callbacks.onStop(data.session, mapMessage(data.assistantMessage), data.navigate, data.editorAction, data.articleAction)
           }
         } catch {
           // 跳过解析失败的 JSON 行
