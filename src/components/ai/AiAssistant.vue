@@ -92,6 +92,10 @@ function buildPageContext(): PageContext {
     pageContext.userId = String(route.params.id ?? '')
   }
 
+  if (name === 'profile') {
+    pageContext.userId = String(authStore.usersVO?.id ?? '')
+  }
+
   return pageContext
 }
 

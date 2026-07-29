@@ -164,6 +164,11 @@ async function handleAiArticleAction(action: ArticleAction) {
     return
   }
 
+  if (action.type === 'scrollToTop') {
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+    return
+  }
+
   if (action.type === 'copyArticleLink') {
     await copyCurrentArticleLink()
     return

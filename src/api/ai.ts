@@ -45,6 +45,7 @@ export interface ArticleAction {
     | 'copyArticleLink'
     | 'followAuthor'
     | 'unfollowAuthor'
+    | 'scrollToTop'
   articleId?: string
   content?: string
 }
