@@ -5,18 +5,29 @@ import {
   Add,
   ArrowBack,
   Attach,
+  BookmarkOutline,
   Close,
   Contract,
   Expand,
   Send,
   Time,
+  TrashOutline,
   CopyOutline,
   RefreshOutline,
   StopCircleOutline,
 } from '@vicons/ionicons5'
-import { useMessage } from 'naive-ui'
+import { useDialog, useMessage } from 'naive-ui'
 import { aiApi } from '@/api/ai'
-import type { AiMessage, AiSession, PageContext, EditorAction, ArticleAction } from '@/api/ai'
+import type {
+  AiMessage,
+  AiSession,
+  PageContext,
+  EditorAction,
+  ArticleAction,
+  ArticleRagReference,
+  AiMemoryCandidate,
+  AiMemory,
+} from '@/api/ai'
 import { emitAiEditorAction } from '@/utils/aiEditorBus'
 import { emitAiArticleAction } from '@/utils/aiArticleActionBus'
 import { renderMarkdown } from '@/utils/markdown'
@@ -31,6 +42,7 @@ const authStore = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+const dialog = useDialog()
 
 const userAvatar = computed(() => authStore.usersVO?.avatarUrl ?? null)
 const isGuest = computed(() => !authStore.isLoggedIn)
@@ -90,6 +102,10 @@ function buildPageContext(): PageContext {
   }
   if (name === 'public-profile') {
     pageContext.userId = String(route.params.id ?? '')
+  }
+  if (name === 'profile') {
+    const myId = authStore.usersVO?.id
+    if (myId) pageContext.userId = String(myId)
   }
 
   return pageContext
@@ -167,7 +183,7 @@ const panelStyle = computed(() => {
   const ty = panelOffset.value.y + resizeOffset.value.y
   const style: Record<string, string> = {}
   if (tx !== 0 || ty !== 0) style.transform = `translate(${tx}px, ${ty}px)`
-  if (panelW.value !== 420) style.width = `${panelW.value}px`
+  if (panelW.value !== 500) style.width = `${panelW.value}px`
   if (panelH.value !== 560) style.height = `${panelH.value}px`
   return Object.keys(style).length > 0 ? style : undefined
 })
@@ -179,7 +195,7 @@ const panelStyle = computed(() => {
 type ResizeDir = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 
 const resizing = ref<ResizeDir | null>(null)
-const panelW = ref(420)
+const panelW = ref(500)
 const panelH = ref(560)
 const resizeOffset = ref({ x: 0, y: 0 })
 let resizeStart = { mx: 0, my: 0, w: 0, h: 0, ox: 0, oy: 0 }
@@ -262,6 +278,25 @@ const sortedSessions = computed(() =>
   ),
 )
 
+// 记忆候选
+const memoryCandidates = ref<AiMemoryCandidate[]>([])
+const loadingMemoryCandidates = ref(false)
+const handlingMemoryCandidateId = ref<string | null>(null)
+
+const pendingMemoryCount = computed(() => memoryCandidates.value.length)
+
+const memoryManagerVisible = ref(false)
+const memoryTab = ref<'candidates' | 'memories'>('candidates')
+const formalMemories = ref<AiMemory[]>([])
+const loadingFormalMemories = ref(false)
+const handlingFormalMemoryId = ref<string | null>(null)
+
+// 行内编辑状态
+const editingCandidateId = ref<string | null>(null)
+const editingCandidateContent = ref('')
+const editingMemoryId = ref<string | null>(null)
+const editingMemoryContent = ref('')
+
 const showWelcome = computed(() => messages.value.length === 0)
 
 // ============================================================
@@ -303,7 +338,16 @@ async function loadMessages(sid: string) {
   loadingMessages.value = true
   try {
     const res = await aiApi.getMessages(sid)
-    messages.value = res.data ?? []
+    // 从 localStorage 恢复 references（后端未持久化，刷新会丢失）
+    messages.value = (res.data ?? []).map(msg => {
+      if (msg.role === 'ai' && (!msg.references || msg.references.length === 0) && msg.id) {
+        try {
+          const cached = localStorage.getItem(`ai_ref_${msg.id}`)
+          if (cached) return { ...msg, references: JSON.parse(cached) }
+        } catch { /* ignore parse errors */ }
+      }
+      return msg
+    })
     await scrollToBottom()
   } catch {
     message.error('加载消息失败')
@@ -335,7 +379,7 @@ function toggleFullscreen() {
   // 切换全屏时重置拖拽和缩放
   panelOffset.value = { x: 0, y: 0 }
   resizeOffset.value = { x: 0, y: 0 }
-  panelW.value = 420
+  panelW.value = 500
   panelH.value = 560
 }
 
@@ -420,6 +464,29 @@ async function handleNavigate(navigate?: { target: string; param?: string }) {
     }
   } catch {
     message.warning('跳转失败，请检查是否需要登录')
+  }
+}
+
+async function openReferenceArticle(reference: ArticleRagReference) {
+  if (!reference.articleId) {
+    message.warning('缺少文章 ID，无法打开来源')
+    return
+  }
+
+  const path = `/articles/${reference.articleId}`
+
+  if (router.currentRoute.value.path === path) {
+    message.info('已经在这篇文章了')
+    return
+  }
+
+  try {
+    const failure = await router.push(path)
+    if (failure) {
+      message.warning('打开来源文章失败')
+    }
+  } catch {
+    message.warning('打开来源文章失败')
   }
 }
 
@@ -553,12 +620,13 @@ async function send(text?: string, skipUserMessage = false) {
         await nextTick()
         scrollToBottom()
       },
-      async onStop(session, assistantMessage, navigate, editorAction, articleAction) {
+      async onStop(session, assistantMessage, navigate, editorAction, articleAction, references) {
         abortController = null
         const legacyNavigate = extractLegacyNavigate(assistantMessage.content)
         assistantMessage = {
           ...assistantMessage,
           content: legacyNavigate.cleanContent,
+          references: references ?? assistantMessage.references ?? [],
         }
         navigate = navigate ?? legacyNavigate.navigate
 
@@ -571,6 +639,12 @@ async function send(text?: string, skipUserMessage = false) {
           }
         }
         if (idx >= 0) messages.value[idx] = assistantMessage
+
+        // 持久化 references 到 localStorage，防止刷新丢失（后端未存 references）
+        const refs = assistantMessage.references
+        if (refs && refs.length > 0 && assistantMessage.id) {
+          try { localStorage.setItem(`ai_ref_${assistantMessage.id}`, JSON.stringify(refs)) } catch { /* quota exceeded, ignore */ }
+        }
 
         if (isGuest.value) {
           saveGuestMessages(messages.value)
@@ -596,6 +670,8 @@ async function send(text?: string, skipUserMessage = false) {
         if (articleAction) {
           await handleArticleAction(articleAction)
         }
+
+        scheduleMemoryCandidateRefresh()
       },
       onError(error) {
         abortController = null
@@ -634,6 +710,209 @@ async function copyMessage(msg: AiMessage) {
     message.success('已复制')
   } catch {
     message.error('复制失败')
+  }
+}
+
+async function deleteMessage(index: number) {
+  const msg = messages.value[index]
+  if (!msg?.id) return
+
+  messages.value.splice(index, 1)
+
+  if (isGuest.value) {
+    saveGuestMessages(messages.value)
+    return
+  }
+
+  try {
+    await aiApi.deleteMessage(msg.sessionId, msg.id)
+  } catch {
+    message.error('删除失败')
+    // 回滚：API 失败时前端已经删了，简单提示即可
+  }
+}
+
+// ============================================================
+// Memory candidates
+// ============================================================
+
+async function loadMemoryCandidates() {
+  if (isGuest.value) {
+    memoryCandidates.value = []
+    return
+  }
+
+  loadingMemoryCandidates.value = true
+  try {
+    const res = await aiApi.getMemoryCandidates()
+    memoryCandidates.value = res.data ?? []
+  } catch {
+    // 候选记忆不是聊天主流程，失败不打断用户
+  } finally {
+    loadingMemoryCandidates.value = false
+  }
+}
+
+function scheduleMemoryCandidateRefresh() {
+  if (isGuest.value) return
+
+  window.setTimeout(() => {
+    loadMemoryCandidates()
+  }, 1500)
+}
+
+async function confirmMemoryCandidate(id: string) {
+  handlingMemoryCandidateId.value = id
+  try {
+    // 如果正在编辑该候选，把编辑内容传过去
+    const editedContent =
+      editingCandidateId.value === id ? editingCandidateContent.value.trim() || undefined : undefined
+    await aiApi.confirmMemoryCandidate(id, editedContent)
+    editingCandidateId.value = null
+    editingCandidateContent.value = ''
+    memoryCandidates.value = memoryCandidates.value.filter((item) => item.id !== id)
+    // 如果记忆管理弹窗开着，同步刷新长期记忆列表
+    if (memoryManagerVisible.value) {
+      loadFormalMemories()
+    }
+    message.success('已保存到长期记忆')
+  } catch {
+    message.error('保存记忆失败')
+  } finally {
+    handlingMemoryCandidateId.value = null
+  }
+}
+
+async function rejectMemoryCandidate(id: string) {
+  handlingMemoryCandidateId.value = id
+  try {
+    await aiApi.rejectMemoryCandidate(id)
+    memoryCandidates.value = memoryCandidates.value.filter((item) => item.id !== id)
+    message.success('已忽略')
+  } catch {
+    message.error('忽略失败')
+  } finally {
+    handlingMemoryCandidateId.value = null
+  }
+}
+
+function memoryTypeLabel(type: AiMemoryCandidate['memoryType']) {
+  if (type === 'PROFILE') return '画像'
+  if (type === 'PREFERENCE') return '偏好'
+  if (type === 'PROJECT_STATE') return '项目'
+  return type
+}
+
+function memoryActionLabel(action: AiMemoryCandidate['candidateAction']) {
+  if (action === 'CREATE') return '新增'
+  if (action === 'UPDATE') return '更新'
+  if (action === 'MERGE') return '合并'
+  if (action === 'IGNORE') return '忽略'
+  return action
+}
+
+function confirmMemoryCandidateLabel(action: AiMemoryCandidate['candidateAction']) {
+  return action === 'IGNORE' ? '确认忽略' : '保存'
+}
+
+async function openMemoryManager() {
+  memoryManagerVisible.value = true
+  memoryTab.value = pendingMemoryCount.value > 0 ? 'candidates' : 'memories'
+  await Promise.all([loadMemoryCandidates(), loadFormalMemories()])
+}
+
+async function loadFormalMemories() {
+  if (isGuest.value) {
+    formalMemories.value = []
+    return
+  }
+
+  loadingFormalMemories.value = true
+  try {
+    const res = await aiApi.getMemories()
+    formalMemories.value = res.data ?? []
+  } catch {
+    message.error('加载长期记忆失败')
+  } finally {
+    loadingFormalMemories.value = false
+  }
+}
+
+function promptDeleteMemory(id: string) {
+  dialog.warning({
+    title: '确认删除',
+    content: '删除后 AI 不会再使用这条记忆',
+    positiveText: '确认删除',
+    negativeText: '取消',
+    onPositiveClick: () => {
+      deleteFormalMemory(id)
+    },
+  })
+}
+
+async function deleteFormalMemory(id: string) {
+  handlingFormalMemoryId.value = id
+  try {
+    await aiApi.deleteMemory(id)
+    formalMemories.value = formalMemories.value.filter((item) => item.id !== id)
+    message.success('已删除长期记忆')
+  } catch {
+    message.error('删除长期记忆失败')
+  } finally {
+    handlingFormalMemoryId.value = null
+  }
+}
+
+// ============================================================
+// 行内编辑
+// ============================================================
+
+function startEditCandidate(candidate: AiMemoryCandidate) {
+  editingCandidateId.value = candidate.id
+  editingCandidateContent.value = candidate.content
+}
+
+function cancelEditCandidate() {
+  editingCandidateId.value = null
+  editingCandidateContent.value = ''
+}
+
+function startEditMemory(mem: AiMemory) {
+  editingMemoryId.value = mem.id
+  editingMemoryContent.value = mem.content
+}
+
+function cancelEditMemory() {
+  editingMemoryId.value = null
+  editingMemoryContent.value = ''
+}
+
+async function saveEditMemory(mem: AiMemory) {
+  const newContent = editingMemoryContent.value.trim()
+  if (!newContent) {
+    message.warning('内容不能为空')
+    return
+  }
+  handlingFormalMemoryId.value = mem.id
+  try {
+    await aiApi.updateMemory(mem.id, {
+      memoryType: mem.memoryType,
+      memoryKey: mem.memoryKey,
+      content: newContent,
+    })
+    // 更新本地列表
+    const found = formalMemories.value.find((item) => item.id === mem.id)
+    if (found) {
+      found.content = newContent
+      found.updatedAt = new Date().toISOString()
+    }
+    editingMemoryId.value = null
+    editingMemoryContent.value = ''
+    message.success('已更新')
+  } catch {
+    message.error('更新失败')
+  } finally {
+    handlingFormalMemoryId.value = null
   }
 }
 
@@ -680,8 +959,8 @@ const suggestions = [
 // ============================================================
 
 watch(visible, async (v) => {
-  if (!v) {
-    // 面板关闭时不清除数据，下次打开可恢复
+  if (v && !isGuest.value) {
+    loadMemoryCandidates()
   }
 })
 </script>
@@ -725,6 +1004,14 @@ watch(visible, async (v) => {
             </template>
             创建会话
           </n-button>
+          <n-badge :value="pendingMemoryCount" :show="pendingMemoryCount > 0" :max="99">
+            <n-button v-if="!isGuest" size="tiny" quaternary @click="openMemoryManager">
+              <template #icon>
+                <n-icon :component="BookmarkOutline" size="16" />
+              </template>
+              记忆
+            </n-button>
+          </n-badge>
           <n-button v-if="!isGuest" size="tiny" quaternary @click="openHistory">
             <template #icon>
               <n-icon :component="Time" size="16" />
@@ -859,7 +1146,29 @@ watch(visible, async (v) => {
                   <span v-html="renderMarkdown(msg.content)" />
                   <span v-if="isMessageStreaming(i, msg.role)" class="ai-typing-dots"><i class="dot" /><i class="dot" /><i class="dot" /></span>
                 </div>
-                <div v-else class="ai-msg-bubble">{{ msg.content }}</div>
+
+                <div
+                  v-if="msg.role === 'ai' && msg.references?.length"
+                  class="ai-rag-references"
+                >
+                  <div class="ai-rag-title">参考来源</div>
+                  <button
+                    v-for="(reference, referenceIndex) in msg.references"
+                    :key="`${reference.articleId}-${reference.chunkIndex}`"
+                    class="ai-rag-item"
+                    type="button"
+                    @click="openReferenceArticle(reference)"
+                  >
+                    <span class="ai-rag-item-title">
+                      <span class="ai-rag-item-index">[{{ referenceIndex + 1 }}]</span>
+                      {{ reference.title || `文章 ${reference.articleId}` }}
+                    </span>
+                    <span class="ai-rag-item-snippet">{{ reference.snippet }}</span>
+                    <span class="ai-rag-item-meta">片段 {{ reference.chunkIndex + 1 }}</span>
+                  </button>
+                </div>
+
+                <div v-else-if="msg.role !== 'ai'" class="ai-msg-bubble">{{ msg.content }}</div>
                 <div class="ai-msg-meta">
                   <div v-if="msg.role === 'ai'" class="ai-msg-actions">
                     <button class="ai-msg-action-btn" title="复制" @click="copyMessage(msg)">
@@ -867,6 +1176,14 @@ watch(visible, async (v) => {
                     </button>
                     <button class="ai-msg-action-btn" title="重新生成" @click="regenerate(i)">
                       <n-icon :component="RefreshOutline" size="15" />
+                    </button>
+                    <button class="ai-msg-action-btn" title="删除" @click="deleteMessage(i)">
+                      <n-icon :component="TrashOutline" size="15" />
+                    </button>
+                  </div>
+                  <div v-else class="ai-msg-actions">
+                    <button class="ai-msg-action-btn" title="删除" @click="deleteMessage(i)">
+                      <n-icon :component="TrashOutline" size="15" />
                     </button>
                   </div>
                   <span class="ai-msg-time">{{ formatMessageTime(msg.createdAt) }}</span>
@@ -926,6 +1243,208 @@ watch(visible, async (v) => {
       <div class="ai-resize-h resize-se" @mousedown="onResizeStart($event, 'se')" />
       <div class="ai-resize-h resize-sw" @mousedown="onResizeStart($event, 'sw')" />
     </div>
+
+    <!-- 记忆管理模态框 -->
+    <n-modal
+      v-model:show="memoryManagerVisible"
+      preset="card"
+      title="记忆管理"
+      size="small"
+      closable
+      :bordered="false"
+      :mask-closable="false"
+      class="ai-memory-modal"
+      style="width: min(640px, calc(100vw - 32px));"
+    >
+      <template #header-extra>
+        <n-tabs
+          :value="memoryTab"
+          size="small"
+          class="ai-memory-tabs"
+          @update:value="(v: string) => memoryTab = v as 'candidates' | 'memories'"
+        >
+          <n-tab-pane name="candidates" tab="待确认" />
+          <n-tab-pane name="memories" tab="长期记忆" />
+        </n-tabs>
+      </template>
+
+      <!-- 待确认记忆 -->
+      <div v-if="memoryTab === 'candidates'" class="ai-memory-tab-body">
+        <div v-if="loadingMemoryCandidates" class="ai-memory-empty">
+          加载中...
+        </div>
+
+        <div v-else-if="memoryCandidates.length === 0" class="ai-memory-empty">
+          暂无待确认记忆
+        </div>
+
+        <div v-else class="ai-memory-list">
+          <div
+            v-for="candidate in memoryCandidates"
+            :key="candidate.id"
+            class="ai-memory-item"
+          >
+            <div class="ai-memory-item-head">
+              <span class="ai-memory-type">
+                {{ memoryTypeLabel(candidate.memoryType) }}
+                <span class="ai-memory-key">{{ candidate.memoryKey }}</span>
+              </span>
+              <span class="ai-memory-importance">重要性 {{ candidate.importance ?? 5 }}</span>
+            </div>
+
+            <div class="ai-memory-meta-row">
+              <span class="ai-memory-action" :class="`ai-memory-action--${candidate.candidateAction.toLowerCase()}`">
+                {{ memoryActionLabel(candidate.candidateAction) }}
+              </span>
+              <span v-if="candidate.targetMemoryId" class="ai-memory-target">
+                目标 #{{ candidate.targetMemoryId }}
+              </span>
+            </div>
+
+            <!-- 编辑模式 -->
+            <textarea
+              v-if="editingCandidateId === candidate.id"
+              v-model="editingCandidateContent"
+              class="ai-memory-edit-input"
+              rows="3"
+            />
+            <div v-else class="ai-memory-content">{{ candidate.content }}</div>
+
+            <div v-if="candidate.mergedContent" class="ai-memory-merged">
+              合并后：{{ candidate.mergedContent }}
+            </div>
+
+            <div v-if="candidate.reason" class="ai-memory-reason">
+              {{ candidate.reason }}
+            </div>
+
+            <div v-if="candidate.decisionReason" class="ai-memory-reason">
+              决策：{{ candidate.decisionReason }}
+            </div>
+
+            <div class="ai-memory-actions">
+              <!-- 编辑模式操作 -->
+              <template v-if="editingCandidateId === candidate.id">
+                <n-button size="tiny" quaternary @click="cancelEditCandidate">
+                  取消
+                </n-button>
+                <n-button
+                  size="tiny"
+                  type="primary"
+                  :loading="handlingMemoryCandidateId === candidate.id"
+                  @click="confirmMemoryCandidate(candidate.id)"
+                >
+                  保存
+                </n-button>
+                <n-button
+                  size="tiny"
+                  quaternary
+                  :loading="handlingMemoryCandidateId === candidate.id"
+                  @click="rejectMemoryCandidate(candidate.id)"
+                >
+                  忽略
+                </n-button>
+              </template>
+              <!-- 普通模式操作 -->
+              <template v-else>
+                <n-button size="tiny" quaternary @click="startEditCandidate(candidate)">
+                  编辑
+                </n-button>
+                <n-button
+                  size="tiny"
+                  type="primary"
+                  :loading="handlingMemoryCandidateId === candidate.id"
+                  @click="confirmMemoryCandidate(candidate.id)"
+                >
+                  {{ confirmMemoryCandidateLabel(candidate.candidateAction) }}
+                </n-button>
+                <n-button
+                  size="tiny"
+                  quaternary
+                  :loading="handlingMemoryCandidateId === candidate.id"
+                  @click="rejectMemoryCandidate(candidate.id)"
+                >
+                  忽略
+                </n-button>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 长期记忆 -->
+      <div v-else class="ai-memory-tab-body">
+        <div v-if="loadingFormalMemories" class="ai-memory-empty">
+          加载中...
+        </div>
+
+        <div v-else-if="formalMemories.length === 0" class="ai-memory-empty">
+          暂无长期记忆
+        </div>
+
+        <div v-else class="ai-memory-list">
+          <div
+            v-for="mem in formalMemories"
+            :key="mem.id"
+            class="ai-memory-item"
+          >
+            <div class="ai-memory-item-head">
+              <span class="ai-memory-type">
+                {{ memoryTypeLabel(mem.memoryType) }}
+                <span class="ai-memory-key">{{ mem.memoryKey }}</span>
+              </span>
+              <span class="ai-memory-importance">重要性 {{ mem.importance ?? 5 }}</span>
+            </div>
+
+            <!-- 编辑模式 -->
+            <textarea
+              v-if="editingMemoryId === mem.id"
+              v-model="editingMemoryContent"
+              class="ai-memory-edit-input"
+              rows="3"
+            />
+            <div v-else class="ai-memory-content">{{ mem.content }}</div>
+
+            <div v-if="mem.source" class="ai-memory-source">
+              来源：{{ mem.source }}
+            </div>
+
+            <div class="ai-memory-actions">
+              <span class="ai-memory-date">{{ new Date(mem.updatedAt).toLocaleDateString('zh-CN') }}</span>
+              <!-- 编辑模式操作 -->
+              <template v-if="editingMemoryId === mem.id">
+                <n-button size="tiny" quaternary @click="cancelEditMemory">
+                  取消
+                </n-button>
+                <n-button
+                  size="tiny"
+                  type="primary"
+                  :loading="handlingFormalMemoryId === mem.id"
+                  @click="saveEditMemory(mem)"
+                >
+                  保存
+                </n-button>
+              </template>
+              <!-- 普通模式操作 -->
+              <template v-else>
+                <n-button size="tiny" quaternary @click="startEditMemory(mem)">
+                  编辑
+                </n-button>
+                <n-button
+                  size="tiny"
+                  quaternary
+                  type="error"
+                  :loading="handlingFormalMemoryId === mem.id"
+                  @click="promptDeleteMemory(mem.id)"
+                >
+                  删除
+                </n-button>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+    </n-modal>
   </div>
 </template>
 
@@ -973,7 +1492,7 @@ watch(visible, async (v) => {
    ============================================================ */
 
 .ai-panel {
-  width: 420px;
+  width: 500px;
   height: 560px;
   min-width: 360px;
   min-height: 400px;
@@ -1240,6 +1759,71 @@ watch(visible, async (v) => {
   background: #f3f4f6;
   color: #1f2937;
   border-bottom-left-radius: 4px;
+}
+
+/* ---- RAG 引用列表 ---- */
+
+.ai-rag-references {
+  margin-top: 8px;
+  padding: 9px;
+  border: 1px solid #d8e7e5;
+  border-radius: 8px;
+  background: #f7fbfa;
+}
+
+.ai-rag-title {
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #2f6f73;
+}
+
+.ai-rag-item {
+  display: block;
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ai-rag-item:hover {
+  background: #eef7f6;
+}
+
+.ai-rag-item + .ai-rag-item {
+  margin-top: 4px;
+}
+
+.ai-rag-item-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1f2937;
+  line-height: 1.4;
+}
+
+.ai-rag-item-index {
+  margin-right: 6px;
+  color: #2f6f73;
+}
+
+.ai-rag-item-snippet {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #4b5563;
+}
+
+.ai-rag-item-meta {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #7c8f8d;
 }
 
 /* ---- 消息操作按钮与时间戳 ---- */
@@ -1706,6 +2290,217 @@ watch(visible, async (v) => {
 .resize-nw { top: 0; left: 0; width: 14px; height: 14px; cursor: nwse-resize; }
 .resize-se { bottom: 0; right: 0; width: 14px; height: 14px; cursor: nwse-resize; }
 .resize-sw { bottom: 0; left: 0; width: 14px; height: 14px; cursor: nesw-resize; }
+
+/* ============================================================
+   Memory popover
+   ============================================================ */
+
+:global(.ai-memory-modal) {
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 18px 56px rgba(15, 23, 42, 0.18);
+}
+
+:global(.ai-memory-modal .n-card-header) {
+  align-items: center;
+  padding: 14px 18px 10px;
+  border-bottom: 1px solid #eef0f2;
+}
+
+:global(.ai-memory-modal .n-card-header__main) {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+:global(.ai-memory-modal .n-card-header__extra) {
+  min-width: 0;
+}
+
+:global(.ai-memory-modal .n-card__content) {
+  padding: 0 18px 18px;
+}
+
+.ai-memory-tabs {
+  width: 168px;
+}
+
+:global(.ai-memory-tabs .n-tabs-nav) {
+  line-height: 1;
+}
+
+.ai-memory-popover {
+  max-height: 360px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.ai-memory-title {
+  margin-bottom: 10px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.ai-memory-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  padding: 16px 4px;
+  font-size: 13px;
+  color: #6b7280;
+  text-align: center;
+}
+
+.ai-memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ai-memory-item {
+  padding: 11px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.ai-memory-item-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.ai-memory-type {
+  font-size: 12px;
+  font-weight: 700;
+  color: #2f6f73;
+}
+
+.ai-memory-key {
+  margin-left: 6px;
+  font-weight: 500;
+  color: #7c8a95;
+}
+
+.ai-memory-importance {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.ai-memory-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+  font-size: 12px;
+}
+
+.ai-memory-action {
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid #d1d5db;
+  color: #4b5563;
+  background: #fff;
+}
+
+.ai-memory-action--create {
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+}
+
+.ai-memory-action--update {
+  border-color: #fde68a;
+  color: #92400e;
+}
+
+.ai-memory-action--merge {
+  border-color: #bbf7d0;
+  color: #166534;
+}
+
+.ai-memory-action--ignore {
+  border-color: #e5e7eb;
+  color: #6b7280;
+}
+
+.ai-memory-target {
+  color: #7c8a95;
+}
+
+.ai-memory-content {
+  font-size: 13px;
+  line-height: 1.5;
+  color: #1f2937;
+  word-break: break-word;
+}
+
+.ai-memory-edit-input {
+  width: 100%;
+  padding: 7px 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #1f2937;
+  border: 1.5px solid #3b82f6;
+  border-radius: 6px;
+  outline: none;
+  resize: vertical;
+  font-family: inherit;
+  background: #fff;
+}
+
+.ai-memory-edit-input:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+}
+
+.ai-memory-merged {
+  margin-top: 6px;
+  padding: 7px 8px;
+  border-left: 3px solid #86efac;
+  background: #f0fdf4;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #166534;
+  word-break: break-word;
+}
+
+.ai-memory-reason {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #6b7280;
+}
+
+.ai-memory-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ai-memory-tab-body {
+  max-height: min(430px, calc(100vh - 220px));
+  min-height: 180px;
+  padding-top: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.ai-memory-source {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.ai-memory-date {
+  font-size: 12px;
+  color: #bbb;
+  margin-right: auto;
+}
 
 /* ============================================================
    Responsive
