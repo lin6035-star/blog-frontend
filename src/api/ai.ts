@@ -5,6 +5,42 @@ import type { PageData } from '@/types/result'
 // 前端统一类型（role 用 'ai' 而不是后端的 'assistant'）
 // ============================================================
 
+export interface ArticleRagReference {
+  articleId: number
+  title: string
+  chunkIndex: number
+  snippet: string
+}
+
+export interface AiMemoryCandidate {
+  id: string
+  memoryType: 'PROFILE' | 'PREFERENCE' | 'PROJECT_STATE'
+  memoryKey: string
+  content: string
+  candidateAction: 'CREATE' | 'UPDATE' | 'MERGE' | 'IGNORE'
+  reason?: string
+  decisionReason?: string
+  mergedContent?: string
+  targetMemoryId?: string
+  confidence?: number
+  importance?: number
+  status: 'PENDING' | 'CONFIRMED' | 'REJECTED'
+  createdAt: string
+}
+
+export interface AiMemory {
+  id: string
+  memoryType: 'PROFILE' | 'PREFERENCE' | 'PROJECT_STATE'
+  memoryKey: string
+  content: string
+  source: string
+  confidence?: number
+  importance?: number
+  enabled: number
+  createdAt: string
+  updatedAt: string
+}
+
 export interface AiSession {
   id: string
   title: string
@@ -19,6 +55,7 @@ export interface AiMessage {
   content: string
   pageContext?: string
   createdAt: string
+  references?: ArticleRagReference[]
 }
 
 export interface NavigateCommand {
@@ -70,7 +107,14 @@ export interface PageContext {
 export interface StreamCallbacks {
   onParam: (session: AiSession, userMessage: AiMessage) => void
   onData: (chunk: string) => Promise<void> | void
-  onStop: (session: AiSession, assistantMessage: AiMessage, navigate?: NavigateCommand, editorAction?: EditorAction, articleAction?: ArticleAction) => void
+  onStop: (
+    session: AiSession,
+    assistantMessage: AiMessage,
+    navigate?: NavigateCommand,
+    editorAction?: EditorAction,
+    articleAction?: ArticleAction,
+    references?: ArticleRagReference[],
+  ) => void
   onError: (error: Error) => void
   /** 用户主动停止生成，前端自行处理（保留已输出内容） */
   onAbort?: () => void
@@ -94,15 +138,7 @@ interface AiMessageRaw {
   content: string
   pageContext?: string
   createdAt: string
-}
-
-interface AiChatResultRaw {
-  session: AiSessionRaw
-  userMessage: AiMessageRaw
-  assistantMessage: AiMessageRaw
-  navigate?: NavigateCommand
-  editorAction?: EditorAction
-  articleAction?: ArticleAction
+  references?: ArticleRagReference[]
 }
 
 // ============================================================
@@ -113,17 +149,6 @@ function mapMessage(m: AiMessageRaw): AiMessage {
   return {
     ...m,
     role: m.role === 'assistant' ? 'ai' : m.role,
-  }
-}
-
-function mapChatResult(raw: AiChatResultRaw): AiChatResult {
-  return {
-    session: raw.session,
-    userMessage: mapMessage(raw.userMessage),
-    assistantMessage: mapMessage(raw.assistantMessage),
-    navigate: raw.navigate,
-    editorAction: raw.editorAction,
-    articleAction: raw.articleAction,
   }
 }
 
@@ -230,8 +255,22 @@ async function streamChat(
               navigate?: NavigateCommand
               editorAction?: EditorAction
               articleAction?: ArticleAction
+              references?: ArticleRagReference[]
             }
-            callbacks.onStop(data.session, mapMessage(data.assistantMessage), data.navigate, data.editorAction, data.articleAction)
+
+            const assistantMessage = {
+              ...mapMessage(data.assistantMessage),
+              references: data.references ?? [],
+            }
+
+            callbacks.onStop(
+              data.session,
+              assistantMessage,
+              data.navigate,
+              data.editorAction,
+              data.articleAction,
+              data.references,
+            )
           }
         } catch {
           // 跳过解析失败的 JSON 行
@@ -284,21 +323,56 @@ export const aiApi = {
     return res as unknown as typeof res & { data: AiMessage[] }
   },
 
+  /** 删除单条消息 */
+  deleteMessage(sessionId: string, messageId: string) {
+    return request.delete(`/ai/conversations/${sessionId}/messages/${messageId}`)
+  },
+
+  /** 查询待确认记忆 */
+  getMemoryCandidates() {
+    return request.get<AiMemoryCandidate[]>('/ai/memory-candidates')
+  },
+
+  /** 确认候选记忆，可传编辑后的 content 覆盖原内容 */
+  confirmMemoryCandidate(id: string, content?: string) {
+    return request.post<void>(`/ai/memory-candidates/${id}/confirm`, content ? { content } : undefined)
+  },
+
+  /** 忽略候选记忆 */
+  rejectMemoryCandidate(id: string) {
+    return request.post<void>(`/ai/memory-candidates/${id}/reject`)
+  },
+
+  /** 查询正式长期记忆 */
+  getMemories() {
+    return request.get<AiMemory[]>('/ai/memories')
+  },
+
+  /** 删除正式长期记忆：后端实际是 enabled = 0 */
+  deleteMemory(id: string) {
+    return request.delete<void>(`/ai/memories/${id}`)
+  },
+
+  /** 编辑长期记忆内容 */
+  updateMemory(id: string, data: { memoryType: string; memoryKey: string; content: string }) {
+    return request.put<void>(`/ai/memories/${id}`, data)
+  },
+
   /** 发送消息（SSE 流式） */
   streamChat,
 
-  /** 发送消息（非流式） */
-  async chat(sessionId: string | null, message: string, pageContext?: PageContext) {
-    const body: { sessionId?: string; message: string; pageContext?: PageContext } = {
-      message,
-    }
-    if (sessionId) body.sessionId = sessionId
-    if (pageContext) body.pageContext = pageContext
-
-    const res = await request.post<AiChatResultRaw>('/ai/chat', body)
-    if (res.data) {
-      return { ...res, data: mapChatResult(res.data) }
-    }
-    return res as unknown as typeof res & { data: AiChatResult }
-  },
+  // 【已废弃】非流式接口，前端已全面切到流式，暂时注释，后续删除
+  // async chat(sessionId: string | null, message: string, pageContext?: PageContext) {
+  //   const body: { sessionId?: string; message: string; pageContext?: PageContext } = {
+  //     message,
+  //   }
+  //   if (sessionId) body.sessionId = sessionId
+  //   if (pageContext) body.pageContext = pageContext
+  //
+  //   const res = await request.post<any>('/ai/chat', body)
+  //   if (res.data) {
+  //     return { ...res, data: mapChatResult(res.data) }
+  //   }
+  //   return res as unknown as typeof res & { data: AiChatResult }
+  // },
 }
