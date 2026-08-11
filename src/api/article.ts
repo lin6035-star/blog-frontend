@@ -6,7 +6,7 @@ export interface ArticleListParams {
   page?: number
   pageSize?: number
   keyword?: string
-  categoryId?: number
+  categoryId?: string
   sort?: ArticleSort
 }
 
@@ -22,16 +22,16 @@ export const articleApi = {
   getDetail(id: number | string) {
     return request.get<Article>(`/articles/${id}`)
   },
-  like(articleId: number) {
+  like(articleId: number | string) {
     return request.post(`/articles/${articleId}/like`)
   },
-  unlike(articleId: number) {
+  unlike(articleId: number | string) {
     return request.delete(`/articles/${articleId}/like`)
   },
-  favorite(articleId: number) {
+  favorite(articleId: number | string) {
     return request.post(`/articles/${articleId}/favorite`)
   },
-  unfavorite(articleId: number) {
+  unfavorite(articleId: number | string) {
     return request.delete(`/articles/${articleId}/favorite`)
   },
   share(articleId: number | string) {

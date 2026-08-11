@@ -11,8 +11,8 @@ import CommentEditor from './CommentEditor.vue'
 import CommentItem from './CommentItem.vue'
 
 const props = defineProps<{
-  articleId: number
-  articleAuthorId: number
+  articleId: string
+  articleAuthorId: string
   commentCount?: number
 }>()
 
@@ -31,12 +31,12 @@ const loading = ref(false)
 const loadingMore = ref(false)
 const loadMoreError = ref(false)
 const mainSubmitting = ref(false)
-const activeReplyId = ref<number | null>(null)
-const replySubmittingId = ref<number | null>(null)
-const replyPages = ref<Record<number, number>>({})
-const likingCommentIds = ref<number[]>([])
-const deletingCommentIds = ref<number[]>([])
-const loadingReplyIds = ref<number[]>([])
+const activeReplyId = ref<string | null>(null)
+const replySubmittingId = ref<string | null>(null)
+const replyPages = ref<Record<string, number>>({})
+const likingCommentIds = ref<string[]>([])
+const deletingCommentIds = ref<string[]>([])
+const loadingReplyIds = ref<string[]>([])
 const commentLoadMoreTriggerRef = ref<HTMLElement | null>(null)
 const sectionRef = ref<HTMLElement | null>(null)
 let commentObserver: IntersectionObserver | null = null
@@ -57,13 +57,13 @@ function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
 }
 
-function addPending(target: Ref<number[]>, commentId: number) {
+function addPending(target: Ref<string[]>, commentId: string) {
   if (!target.value.includes(commentId)) {
     target.value = [...target.value, commentId]
   }
 }
 
-function removePending(target: Ref<number[]>, commentId: number) {
+function removePending(target: Ref<string[]>, commentId: string) {
   target.value = target.value.filter((id) => id !== commentId)
 }
 

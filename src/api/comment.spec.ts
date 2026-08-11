@@ -31,7 +31,7 @@ describe('commentApi', () => {
 
   it('publishes comments and replies with content and parentId', () => {
     commentApi.create(10, { content: 'hello', parentId: null })
-    commentApi.create(10, { content: 'reply', parentId: 30 })
+    commentApi.create(10, { content: 'reply', parentId: '30' })
 
     expect(requestMock.post).toHaveBeenNthCalledWith(1, '/articles/10/comments', {
       content: 'hello',
@@ -39,7 +39,7 @@ describe('commentApi', () => {
     })
     expect(requestMock.post).toHaveBeenNthCalledWith(2, '/articles/10/comments', {
       content: 'reply',
-      parentId: 30,
+      parentId: '30',
     })
   })
 

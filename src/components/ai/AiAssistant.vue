@@ -27,6 +27,12 @@ import type {
   ArticleRagReference,
   AiMemoryCandidate,
   AiMemory,
+  AiWorkflowRun,
+  AiWorkflowStepLog,
+  WorkflowStatus,
+  WorkflowStepEvent,
+  WorkflowContentDeltaEvent,
+  WorkflowStreamResult,
 } from '@/api/ai'
 import { emitAiEditorAction } from '@/utils/aiEditorBus'
 import { emitAiArticleAction } from '@/utils/aiArticleActionBus'
@@ -122,6 +128,9 @@ const sending = ref(false)
 const loadingMessages = ref(false)
 const input = ref('')
 const messageListRef = ref<HTMLElement | null>(null)
+// 滚动跟随状态：用户手动上滑后停止自动滚动，滑到底部后恢复
+const shouldAutoScroll = ref(true)
+const AUTO_SCROLL_THRESHOLD = 48
 
 const sessions = ref<AiSession[]>([])
 const currentSessionId = ref<string | null>(null)
@@ -129,6 +138,489 @@ const messages = ref<AiMessage[]>([])
 
 // 用于取消正在进行的流式请求
 let abortController: AbortController | null = null
+
+// ============================================================
+// Workflow 状态
+// ============================================================
+
+const activeWorkflow = ref<AiWorkflowRun | null>(null)
+const workflowBusy = ref(false)
+const workflowRejectEditing = ref(false)
+const workflowFeedback = ref('')
+
+// Workflow 步骤执行日志：按 workflowId 缓存 + 展开态 + 加载态
+const workflowStepLogs = ref<Record<string, AiWorkflowStepLog[]>>({})
+const workflowStepLogsExpanded = ref<Record<string, boolean>>({})
+const workflowStepLogsLoading = ref<Record<string, boolean>>({})
+
+// Workflow 流式正文：生成草稿时按 workflowId 累积 delta
+const workflowStreamingContent = ref<Record<string, string>>({})
+// Workflow 流式大纲：重写大纲时按 workflowId 累积 delta
+const workflowStreamingOutline = ref<Record<string, string>>({})
+
+// 本地过渡态：点击按钮后立刻切换面板，解决"卡住"体感
+type LocalTransition = 'APPROVING' | 'REJECTING' | 'RETRYING' | 'COMPLETING' | 'CANCELLING'
+const localTransition = ref<LocalTransition | null>(null)
+
+const isTransitioning = computed(() => localTransition.value !== null)
+
+const transitionLabel = computed(() => {
+  const t = localTransition.value
+  const status = activeWorkflow.value?.status
+  if (t === 'APPROVING') {
+    if (status === 'WAITING_OUTLINE_CONFIRM') return '正在根据大纲生成草稿...'
+    if (status === 'WAITING_DRAFT_CONFIRM') return '正在校验草稿质量...'
+    if (status === 'WAITING_FILL_CONFIRM') return '正在填充到编辑器...'
+    return 'AI 正在处理...'
+  }
+  if (t === 'REJECTING') {
+    if (status === 'WAITING_OUTLINE_CONFIRM') return '正在根据意见重新生成大纲...'
+    if (status === 'WAITING_DRAFT_CONFIRM') return '正在根据修改意见重写草稿...'
+    if (status === 'WAITING_REQUIREMENT_CONFIRM') return '正在分析补充需求...'
+    return 'AI 正在处理...'
+  }
+  if (t === 'RETRYING') return '正在重试失败步骤...'
+  if (t === 'COMPLETING') return '正在完成工作流...'
+  if (t === 'CANCELLING') return '正在取消工作流...'
+  return ''
+})
+
+const workflowWaitingConfirm = computed(() => {
+  const status = activeWorkflow.value?.status
+  return (
+    status === 'WAITING_OUTLINE_CONFIRM' ||
+    status === 'WAITING_DRAFT_CONFIRM' ||
+    status === 'WAITING_FILL_CONFIRM'
+  )
+})
+
+const workflowNeedRequirement = computed(() => {
+  return activeWorkflow.value?.status === 'WAITING_REQUIREMENT_CONFIRM'
+})
+
+const workflowFailed = computed(() => {
+  return activeWorkflow.value?.status === 'FAILED'
+})
+
+const workflowQualityCheck = computed(() => activeWorkflow.value?.context?.qualityCheck ?? null)
+
+const workflowHasBlockingIssues = computed(() => {
+  const check = workflowQualityCheck.value
+  if (!check) return false
+  return check.passed === false || (check.issues?.length ?? 0) > 0
+})
+
+// 草稿被打回：WAITING_DRAFT_CONFIRM + 存在阻塞问题 → 直接展开修改意见输入框（重写模式）
+const workflowDraftNeedsFix = computed(() => {
+  return (
+    activeWorkflow.value?.status === 'WAITING_DRAFT_CONFIRM' &&
+    workflowHasBlockingIssues.value
+  )
+})
+
+function workflowStatusLabel(status?: WorkflowStatus) {
+  if (status === 'WAITING_REQUIREMENT_CONFIRM') return '等待补充需求'
+  if (status === 'WAITING_OUTLINE_CONFIRM') return '等待确认大纲'
+  if (status === 'WAITING_DRAFT_CONFIRM') return '等待确认草稿'
+  if (status === 'WAITING_FILL_CONFIRM') return '等待填充编辑器'
+  if (status === 'WAITING_USER_SAVE') return '已填充编辑器，等待保存/发布'
+  if (status === 'PAUSED') return '已暂停'
+  if (status === 'FAILED') return '执行失败'
+  if (status === 'COMPLETED') return '已完成'
+  if (status === 'CANCELLED') return '已取消'
+  return 'Workflow'
+}
+
+function workflowStepLabel(step?: string) {
+  if (step === 'REQUIREMENT_ANALYZE') return '需求分析'
+  if (step === 'MEMORY_RETRIEVE') return '记忆召回'
+  if (step === 'RAG_SEARCH') return '知识库检索'
+  if (step === 'GENERATE_OUTLINE') return '生成大纲'
+  if (step === 'GENERATE_DRAFT') return '生成草稿'
+  if (step === 'QUALITY_CHECK') return '质量检查'
+  if (step === 'FILL_ARTICLE') return '填充编辑器'
+  // stream 占位日志兜底：后端没推断出 step 时显示 action
+  if (step === 'APPROVE') return '确认推进'
+  if (step === 'REJECT') return '按反馈重新生成'
+  if (step === 'RETRY') return '重试失败步骤'
+  return step || '未知'
+}
+
+function workflowStepStatusLabel(status?: string) {
+  if (status === 'RUNNING') return '执行中'
+  if (status === 'SUCCESS') return '成功'
+  if (status === 'FAILED') return '失败'
+  if (status === 'SKIPPED') return '跳过'
+  return status || '未知'
+}
+
+function workflowStepStatusClass(status?: string) {
+  if (status === 'SUCCESS') return 'ai-workflow-step-log__status--success'
+  if (status === 'FAILED') return 'ai-workflow-step-log__status--failed'
+  if (status === 'RUNNING') return 'ai-workflow-step-log__status--running'
+  if (status === 'SKIPPED') return 'ai-workflow-step-log__status--skipped'
+  return ''
+}
+
+function formatDuration(ms?: number) {
+  if (ms === undefined || ms === null) return '—'
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+function formatWorkflowQualityCheck(check?: {
+  passed?: boolean
+  issues?: string[]
+  suggestions?: string[]
+}) {
+  // passed 为空时表示质量检查尚未执行（如大纲确认阶段），不展示
+  if (!check || check.passed === undefined) return ''
+
+  const lines: string[] = []
+  lines.push(`质量检查：${check.passed === false ? '未通过' : '通过'}`)
+
+  if (check.issues?.length) {
+    lines.push(`\n问题：\n- ${check.issues.join('\n- ')}`)
+  }
+
+  if (check.suggestions?.length) {
+    lines.push(`\n建议：\n- ${check.suggestions.join('\n- ')}`)
+  }
+
+  return lines.join('\n')
+}
+
+function buildWorkflowSnapshotContent(workflow: AiWorkflowRun) {
+  const requirement = workflow.context?.requirement?.topic?.trim() || '文章'
+  const outline = workflow.context?.outline?.trim()
+  const draft = workflow.context?.draft
+  const qualityCheck = workflow.context?.qualityCheck
+
+  if (workflow.status === 'WAITING_OUTLINE_CONFIRM') {
+    return outline || `已进入 ${requirement} 工作流，正在生成大纲。`
+  }
+
+  if (
+    workflow.status === 'WAITING_DRAFT_CONFIRM' ||
+    workflow.status === 'WAITING_FILL_CONFIRM' ||
+    workflow.status === 'WAITING_USER_SAVE' ||
+    workflow.status === 'COMPLETED'
+  ) {
+    const title = draft?.title?.trim() || requirement
+    const summary = draft?.summary?.trim()
+    const content = draft?.content?.trim()
+    const qualityText = formatWorkflowQualityCheck(qualityCheck)
+
+    return [
+      `## ${title}`,
+      summary,
+      content,
+      qualityText,
+    ].filter(Boolean).join('\n\n')
+  }
+
+  return `Workflow 状态：${workflow.status}`
+}
+
+function syncWorkflowSnapshotMessage(workflow: AiWorkflowRun) {
+  // 找到消息列表中已有的 workflow 消息，更新其 workflow 字段
+  const existingIndex = messages.value.findIndex(
+    (msg) => msg.role === 'ai' && msg.workflow?.id === workflow.id,
+  )
+  if (existingIndex >= 0) {
+    messages.value[existingIndex] = {
+      ...messages.value[existingIndex],
+      workflow,
+      content: buildWorkflowSnapshotContent(workflow),
+    }
+  }
+}
+
+/** 刷新后历史消息没有 workflow 字段，把当前 active workflow 挂回最后一条 AI 消息 */
+function attachWorkflowToLatestAiMessage(workflow: AiWorkflowRun) {
+  const existingIndex = messages.value.findIndex(
+    (msg) => msg.role === 'ai' && msg.workflow?.id === workflow.id,
+  )
+
+  if (existingIndex >= 0) {
+    messages.value[existingIndex] = {
+      ...messages.value[existingIndex],
+      workflow,
+      content: buildWorkflowSnapshotContent(workflow),
+    }
+    return
+  }
+
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    if (messages.value[i].role === 'ai') {
+      messages.value[i] = {
+        ...messages.value[i],
+        workflow,
+        content: buildWorkflowSnapshotContent(workflow),
+      }
+      return
+    }
+  }
+}
+
+function resetWorkflowRejectUI() {
+  workflowRejectEditing.value = false
+  workflowFeedback.value = ''
+}
+
+async function approveWorkflow() {
+  if (!activeWorkflow.value || workflowBusy.value) return
+
+  workflowBusy.value = true
+  localTransition.value = 'APPROVING'
+  try {
+    const workflowId = activeWorkflow.value.id
+
+    await aiApi.streamApproveWorkflow(workflowId, {
+      onStep: applyWorkflowStepEvent,
+      onContentDelta: applyWorkflowContentDelta,
+      async onStop(data) {
+        await applyWorkflowStreamResult(data)
+        resetWorkflowRejectUI()
+      },
+      async onWorkflowError(data) {
+        await applyWorkflowStreamResult(data)
+        message.error(data.message ?? data.workflow?.errorMessage ?? 'Workflow 执行失败')
+      },
+      onError(error) {
+        message.error(error?.message ?? 'Workflow 同意失败')
+      },
+    })
+  } catch (error: any) {
+    message.error(error?.message ?? 'Workflow 同意失败')
+  } finally {
+    workflowBusy.value = false
+    localTransition.value = null
+  }
+}
+
+async function rejectWorkflow() {
+  const feedback = workflowFeedback.value.trim()
+  if (!feedback) {
+    message.warning('请先填写修改意见')
+    return
+  }
+  if (!activeWorkflow.value || workflowBusy.value) return
+
+  workflowBusy.value = true
+  localTransition.value = 'REJECTING'
+  try {
+    const workflowId = activeWorkflow.value.id
+
+    await aiApi.streamRejectWorkflow(workflowId, feedback, {
+      onStep: applyWorkflowStepEvent,
+      onContentDelta: applyWorkflowContentDelta,
+      async onStop(data) {
+        await applyWorkflowStreamResult(data)
+        resetWorkflowRejectUI()
+      },
+      async onWorkflowError(data) {
+        await applyWorkflowStreamResult(data)
+        message.error(data.message ?? data.workflow?.errorMessage ?? 'Workflow 修改失败')
+      },
+      onError(error) {
+        message.error(error?.message ?? 'Workflow 修改失败')
+      },
+    })
+  } catch (error: any) {
+    message.error(error?.message ?? 'Workflow 修改失败')
+  } finally {
+    workflowBusy.value = false
+    localTransition.value = null
+  }
+}
+
+async function retryWorkflow() {
+  if (!activeWorkflow.value || workflowBusy.value) return
+
+  workflowBusy.value = true
+  localTransition.value = 'RETRYING'
+  try {
+    const workflowId = activeWorkflow.value.id
+
+    await aiApi.streamRetryWorkflow(workflowId, {
+      onStep: applyWorkflowStepEvent,
+      onContentDelta: applyWorkflowContentDelta,
+      async onStop(data) {
+        await applyWorkflowStreamResult(data)
+        resetWorkflowRejectUI()
+        message.success('Workflow 已重试')
+      },
+      async onWorkflowError(data) {
+        await applyWorkflowStreamResult(data)
+        message.error(data.message ?? data.workflow?.errorMessage ?? 'Workflow 重试失败')
+      },
+      onError(error) {
+        message.error(error?.message ?? 'Workflow 重试失败')
+      },
+    })
+  } catch (error: any) {
+    message.error(error?.message ?? 'Workflow 重试失败')
+  } finally {
+    workflowBusy.value = false
+    localTransition.value = null
+  }
+}
+
+async function completeWorkflow() {
+  if (!activeWorkflow.value || workflowBusy.value) return
+
+  workflowBusy.value = true
+  localTransition.value = 'COMPLETING'
+  try {
+    const res = await aiApi.completeWorkflow(activeWorkflow.value.id)
+    if (res.data) {
+      activeWorkflow.value = res.data
+      syncWorkflowSnapshotMessage(res.data)
+      await refreshWorkflowStepLogs(res.data.id)
+      clearSessionActiveWorkflow(res.data.id)
+      message.success('Workflow 已完成')
+    }
+  } catch (error: any) {
+    message.error(error?.message ?? '完成 Workflow 失败')
+  } finally {
+    workflowBusy.value = false
+    localTransition.value = null
+  }
+}
+
+async function cancelWorkflow() {
+  if (!activeWorkflow.value || workflowBusy.value) return
+
+  const workflowId = activeWorkflow.value.id
+
+  workflowBusy.value = true
+  localTransition.value = 'CANCELLING'
+  try {
+    await aiApi.cancelWorkflow(workflowId)
+    clearSessionActiveWorkflow(workflowId)
+    activeWorkflow.value = null
+    workflowRejectEditing.value = false
+    workflowFeedback.value = ''
+    message.success('Workflow 已取消')
+  } catch (error: any) {
+    message.error(error?.message ?? '取消 Workflow 失败')
+  } finally {
+    workflowBusy.value = false
+    localTransition.value = null
+  }
+}
+
+/** 完成/取消后清掉本地 sessions 缓存里的 activeWorkflowRunId */
+function clearSessionActiveWorkflow(workflowId?: string) {
+  const session = sessions.value.find((item) => item.id === currentSessionId.value)
+  if (session && (!workflowId || session.activeWorkflowRunId === workflowId)) {
+    session.activeWorkflowRunId = undefined
+  }
+}
+
+/** 流式 delta：draft.content 累积正文，outline 累积大纲 */
+function applyWorkflowContentDelta(event: WorkflowContentDeltaEvent) {
+  if (!event.workflowRunId) return
+
+  if (event.field === 'draft.content') {
+    const old = workflowStreamingContent.value[event.workflowRunId] ?? ''
+    workflowStreamingContent.value[event.workflowRunId] = old + (event.delta ?? '')
+    return
+  }
+
+  if (event.field === 'outline') {
+    const old = workflowStreamingOutline.value[event.workflowRunId] ?? ''
+    workflowStreamingOutline.value[event.workflowRunId] = old + (event.delta ?? '')
+  }
+}
+
+/** 流式 step 事件：展开日志区并插入临时 RUNNING 日志 */
+function applyWorkflowStepEvent(event: WorkflowStepEvent) {
+  const workflowId = event.workflowRunId
+  if (!workflowId) return
+
+  workflowStepLogsExpanded.value[workflowId] = true
+  workflowStepLogsLoading.value[workflowId] = false
+
+  const runningLog: AiWorkflowStepLog = {
+    id: `stream-${workflowId}-${event.step ?? event.action ?? 'workflow'}`,
+    workflowRunId: workflowId,
+    logType: 'STEP', // 实时流都来自 runStep（步骤级）
+    stepOrder: 0,
+    step: event.step ?? event.action ?? 'WORKFLOW',
+    status: event.status || 'RUNNING',
+    inputSummary: event.message ?? 'Workflow 正在执行...',
+    startedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  }
+
+  // upsert：同 id 的实时日志更新状态（RUNNING → SUCCESS），不同 id 插到最前
+  const oldList = workflowStepLogs.value[workflowId] ?? []
+  const index = oldList.findIndex((log) => log.id === runningLog.id)
+
+  if (index >= 0) {
+    oldList[index] = runningLog
+    workflowStepLogs.value[workflowId] = [...oldList]
+  } else {
+    workflowStepLogs.value[workflowId] = [runningLog, ...oldList]
+  }
+}
+
+/** 流式结束事件：更新 activeWorkflow / 步骤日志 / editorAction */
+async function applyWorkflowStreamResult(data: WorkflowStreamResult) {
+  if (!data.workflow) return
+
+  activeWorkflow.value = data.workflow
+  syncWorkflowSnapshotMessage(data.workflow)
+  // 流式内容已落库到 snapshot，清理累积的 delta
+  delete workflowStreamingContent.value[data.workflow.id]
+  delete workflowStreamingOutline.value[data.workflow.id]
+
+  if (data.stepLogs) {
+    // 保留实时日志（stream- 前缀），拼接数据库 StepLog，避免 STOP 时把执行中的步骤覆盖掉
+    const workflowId = data.workflow.id
+    const liveLogs = (workflowStepLogs.value[workflowId] ?? []).filter((log) =>
+      log.id.startsWith(`stream-${workflowId}-`),
+    )
+
+    workflowStepLogs.value[workflowId] = [
+      ...liveLogs,
+      ...data.stepLogs,
+    ]
+  }
+
+  if (data.editorAction) {
+    await handleEditorAction(data.editorAction)
+  }
+}
+
+/** 展开时刷新步骤日志（仅当该 workflow 的日志区已展开） */
+async function refreshWorkflowStepLogs(workflowId: string) {
+  if (!workflowStepLogsExpanded.value[workflowId]) return
+
+  const res = await aiApi.getWorkflowStepLogs(workflowId)
+  workflowStepLogs.value[workflowId] = res.data ?? []
+}
+
+/** 展开/收起步骤日志，展开时懒加载 */
+async function toggleWorkflowStepLogs(workflowId: string) {
+  workflowStepLogsExpanded.value[workflowId] = !workflowStepLogsExpanded.value[workflowId]
+
+  if (!workflowStepLogsExpanded.value[workflowId]) return
+  if (workflowStepLogs.value[workflowId]?.length) return
+  if (workflowStepLogsLoading.value[workflowId]) return
+
+  workflowStepLogsLoading.value[workflowId] = true
+  try {
+    const res = await aiApi.getWorkflowStepLogs(workflowId)
+    workflowStepLogs.value[workflowId] = res.data ?? []
+  } catch (error: any) {
+    message.error(error?.message ?? '加载 Workflow 执行详情失败')
+  } finally {
+    workflowStepLogsLoading.value[workflowId] = false
+  }
+}
 
 // ============================================================
 // 拖拽移动
@@ -303,10 +795,24 @@ const showWelcome = computed(() => messages.value.length === 0)
 // Scroll
 // ============================================================
 
-async function scrollToBottom() {
+function isNearBottom() {
+  const el = messageListRef.value
+  if (!el) return true
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= AUTO_SCROLL_THRESHOLD
+}
+
+function handleMessageListScroll() {
+  shouldAutoScroll.value = isNearBottom()
+}
+
+async function scrollToBottom(force = false) {
   await nextTick()
-  if (messageListRef.value) {
-    messageListRef.value.scrollTop = messageListRef.value.scrollHeight
+  const el = messageListRef.value
+  if (!el) return
+
+  if (force || shouldAutoScroll.value || isNearBottom()) {
+    el.scrollTop = el.scrollHeight
+    shouldAutoScroll.value = true
   }
 }
 
@@ -334,6 +840,33 @@ async function loadSessions() {
   }
 }
 
+/** 历史消息只带 workflowRunId，补拉 workflow 数据挂回消息，恢复工作流卡片（含执行详情） */
+async function hydrateWorkflowMessages() {
+  const ids = Array.from(
+    new Set(
+      messages.value
+        .filter((msg) => msg.role === 'ai' && msg.workflowRunId && !msg.workflow)
+        .map((msg) => msg.workflowRunId as string),
+    ),
+  )
+  if (!ids.length) return
+
+  const runs = await Promise.allSettled(ids.map((id) => aiApi.getWorkflowRun(id)))
+  ids.forEach((id, i) => {
+    const run = runs[i].status === 'fulfilled' ? runs[i].value?.data : null
+    if (!run) return
+
+    const idx = messages.value.findIndex((msg) => msg.workflowRunId === id && !msg.workflow)
+    if (idx >= 0) {
+      messages.value[idx] = {
+        ...messages.value[idx],
+        workflow: run,
+        content: messages.value[idx].content || buildWorkflowSnapshotContent(run),
+      }
+    }
+  })
+}
+
 async function loadMessages(sid: string) {
   loadingMessages.value = true
   try {
@@ -348,11 +881,40 @@ async function loadMessages(sid: string) {
       }
       return msg
     })
-    await scrollToBottom()
+    // 历史 workflow 卡片：后端消息不带 workflow 对象，按 workflowRunId 补拉
+    await hydrateWorkflowMessages()
+    await scrollToBottom(true)
   } catch {
     message.error('加载消息失败')
   } finally {
     loadingMessages.value = false
+  }
+}
+
+/** 刷新/切会话后恢复 active workflow：从 session 的 activeWorkflowRunId 拉取并挂回消息 */
+async function restoreActiveWorkflow(session?: AiSession | null) {
+  const workflowId = session?.activeWorkflowRunId
+
+  if (!workflowId) {
+    activeWorkflow.value = null
+    return
+  }
+
+  try {
+    const res = await aiApi.getWorkflowRun(workflowId)
+    if (!res.data) {
+      activeWorkflow.value = null
+      return
+    }
+
+    activeWorkflow.value = res.data
+    attachWorkflowToLatestAiMessage(res.data)
+
+    if (workflowStepLogsExpanded.value[res.data.id]) {
+      await refreshWorkflowStepLogs(res.data.id)
+    }
+  } catch {
+    activeWorkflow.value = null
   }
 }
 
@@ -395,6 +957,9 @@ async function switchSession(sid: string) {
   currentSessionId.value = sid
   viewingHistory.value = false
   await loadMessages(sid)
+
+  const session = sessions.value.find((item) => item.id === sid)
+  await restoreActiveWorkflow(session)
 }
 
 /** 创建新会话：游客清空临时消息，登录用户重置为欢迎页 */
@@ -402,11 +967,15 @@ function createSession() {
   if (isGuest.value) {
     clearGuestData()
     messages.value = []
-    input.value = ''
+    guestUsedCount.value = 0
+    activeWorkflow.value = null
     return
   }
   currentSessionId.value = null
   messages.value = []
+  activeWorkflow.value = null
+  workflowRejectEditing.value = false
+  workflowFeedback.value = ''
   viewingHistory.value = false
   input.value = ''
 }
@@ -574,6 +1143,9 @@ async function send(text?: string, skipUserMessage = false) {
     messages.value.push(tempUserMsg)
   }
 
+  await scrollToBottom(true)
+  sending.value = true
+
   // 空 AI 占位气泡（后续 onData 逐 chunk 填充）
   const aiPlaceholder: AiMessage = {
     id: '',
@@ -584,9 +1156,6 @@ async function send(text?: string, skipUserMessage = false) {
   }
   const aiPlaceholderIndex = messages.value.length
   messages.value.push(aiPlaceholder)
-
-  await scrollToBottom()
-  sending.value = true
 
   // 旧的未完成请求先取消
   if (abortController) abortController.abort()
@@ -617,18 +1186,24 @@ async function send(text?: string, skipUserMessage = false) {
             content: currentAiMessage.content + chunk,
           }
         }
-        await nextTick()
-        scrollToBottom()
+        await scrollToBottom()
       },
-      async onStop(session, assistantMessage, navigate, editorAction, articleAction, references) {
+      async onStop(session, assistantMessage, navigate, editorAction, articleAction, references, workflow) {
         abortController = null
+
         const legacyNavigate = extractLegacyNavigate(assistantMessage.content)
         assistantMessage = {
           ...assistantMessage,
           content: legacyNavigate.cleanContent,
           references: references ?? assistantMessage.references ?? [],
+          workflow: workflow ?? (assistantMessage as any).workflow,
         }
         navigate = navigate ?? legacyNavigate.navigate
+
+        // 后端判定为 Workflow：激活底部面板
+        if (workflow) {
+          activeWorkflow.value = workflow
+        }
 
         // 用后端返回的完整数据替换 AI 占位
         let idx = -1
@@ -717,7 +1292,7 @@ async function deleteMessage(index: number) {
   const msg = messages.value[index]
   if (!msg?.id) return
 
-  messages.value.splice(index, 1)
+  const removed = messages.value.splice(index, 1)[0]
 
   if (isGuest.value) {
     saveGuestMessages(messages.value)
@@ -726,9 +1301,9 @@ async function deleteMessage(index: number) {
 
   try {
     await aiApi.deleteMessage(msg.sessionId, msg.id)
-  } catch {
-    message.error('删除失败')
-    // 回滚：API 失败时前端已经删了，简单提示即可
+  } catch (error: any) {
+    messages.value.splice(index, 0, removed)
+    message.error(error?.response?.data?.message ?? '删除失败')
   }
 }
 
@@ -1082,7 +1657,7 @@ watch(visible, async (v) => {
       <!-- 聊天 / 欢迎视图 -->
       <!-- ============================================================ -->
       <template v-else>
-        <div ref="messageListRef" class="ai-body">
+        <div ref="messageListRef" class="ai-body" @scroll="handleMessageListScroll">
           <!-- 消息加载中 -->
           <div v-if="loadingMessages" class="ai-loading">
             <n-spin size="small" />
@@ -1168,6 +1743,144 @@ watch(visible, async (v) => {
                   </button>
                 </div>
 
+                <!-- Workflow 卡片 -->
+                <div v-if="msg.role === 'ai' && msg.workflow" class="ai-workflow-card">
+                  <div class="ai-workflow-card__head">
+                    <span class="ai-workflow-card__badge">文章创作 Workflow</span>
+                    <span class="ai-workflow-card__status">
+                      <template v-if="msg.workflow.id === activeWorkflow?.id && isTransitioning">
+                        <n-spin size="14" /> {{ transitionLabel }}
+                      </template>
+                      <template v-else>{{ workflowStatusLabel(msg.workflow.status) }}</template>
+                    </span>
+                  </div>
+                  <div class="ai-workflow-card__body">
+                    <div class="ai-workflow-card__step">
+                      <span class="ai-workflow-card__label">当前步骤</span>
+                      <span>{{ workflowStepLabel(msg.workflow.currentStep) }}</span>
+                    </div>
+                    <div v-if="msg.workflow.context?.requirement?.topic" class="ai-workflow-card__topic">
+                      <span class="ai-workflow-card__label">主题</span>
+                      <span>{{ msg.workflow.context.requirement.topic }}</span>
+                    </div>
+                    <pre
+                      v-if="workflowStreamingOutline[msg.workflow.id]"
+                      class="ai-workflow-card__outline"
+                    >{{ workflowStreamingOutline[msg.workflow.id] }}</pre>
+                    <pre
+                      v-else-if="msg.workflow.context?.outline"
+                      class="ai-workflow-card__outline"
+                    >{{ msg.workflow.context.outline }}</pre>
+                    <div v-else-if="msg.workflow.context?.draft?.summary" class="ai-workflow-card__summary">
+                      <span class="ai-workflow-card__label">草稿摘要</span>
+                      <p>{{ msg.workflow.context.draft.summary }}</p>
+                    </div>
+                    <!-- 流式正文预览：生成草稿时实时显示 -->
+                    <pre
+                      v-if="workflowStreamingContent[msg.workflow.id]"
+                      class="ai-workflow-card__stream-content"
+                    >{{ workflowStreamingContent[msg.workflow.id] }}</pre>
+                    <div v-if="msg.workflow.context?.qualityCheck && msg.workflow.context.qualityCheck.passed !== undefined" class="ai-workflow-card__quality">
+                      <span class="ai-workflow-card__label">质量检查</span>
+                      <span :class="msg.workflow.context.qualityCheck.passed === false ? 'ai-workflow-card__quality--bad' : 'ai-workflow-card__quality--good'">
+                        {{ msg.workflow.context.qualityCheck.passed === false ? '未通过' : '通过' }}
+                      </span>
+
+                      <div v-if="msg.workflow.context.qualityCheck.issues?.length" class="ai-workflow-card__quality-block">
+                        <div class="ai-workflow-card__quality-title">问题</div>
+                        <ul class="ai-workflow-card__quality-list">
+                          <li v-for="(item, index) in msg.workflow.context.qualityCheck.issues" :key="index">
+                            {{ item }}
+                          </li>
+                        </ul>
+                      </div>
+
+                      <div v-if="msg.workflow.context.qualityCheck.suggestions?.length" class="ai-workflow-card__quality-block">
+                        <div class="ai-workflow-card__quality-title">建议</div>
+                        <ul class="ai-workflow-card__quality-list">
+                          <li v-for="(item, index) in msg.workflow.context.qualityCheck.suggestions" :key="index">
+                            {{ item }}
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
+
+                    <!-- 执行详情（步骤日志，点开才加载） -->
+                    <div class="ai-workflow-step-log">
+                      <button
+                        class="ai-workflow-step-log__toggle"
+                        type="button"
+                        @click="toggleWorkflowStepLogs(msg.workflow.id)"
+                      >
+                        <span>执行详情</span>
+                        <span>{{ workflowStepLogsExpanded[msg.workflow.id] ? '收起' : '展开' }}</span>
+                      </button>
+
+                      <div v-if="workflowStepLogsExpanded[msg.workflow.id]" class="ai-workflow-step-log__body">
+                        <div
+                          v-if="workflowStepLogsLoading[msg.workflow.id]"
+                          class="ai-workflow-step-log__empty"
+                        >
+                          加载中...
+                        </div>
+
+                        <div
+                          v-else-if="!workflowStepLogs[msg.workflow.id]?.length"
+                          class="ai-workflow-step-log__empty"
+                        >
+                          暂无执行日志
+                        </div>
+
+                        <div
+                          v-else
+                          v-for="log in workflowStepLogs[msg.workflow.id]"
+                          :key="log.id"
+                          class="ai-workflow-step-log__item"
+                        >
+                          <div class="ai-workflow-step-log__head">
+                            <span class="ai-workflow-step-log__step">
+                              {{ log.stepOrder ? `第 ${log.stepOrder} 步 · ` : '' }}{{ workflowStepLabel(log.step) }}
+                            </span>
+                            <span
+                              v-if="log.logType"
+                              class="ai-workflow-step-log__type"
+                              :class="log.logType === 'STEP' ? 'is-step' : 'is-operation'"
+                            >
+                              {{ log.logType === 'STEP' ? '步骤' : '操作' }}
+                            </span>
+                            <span
+                              class="ai-workflow-step-log__status"
+                              :class="workflowStepStatusClass(log.status)"
+                            >
+                              {{ workflowStepStatusLabel(log.status) }}
+                            </span>
+                          </div>
+
+                          <div class="ai-workflow-step-log__meta">
+                            <span>耗时 {{ formatDuration(log.durationMs) }}</span>
+                            <span v-if="log.retryCount">重试 {{ log.retryCount }}</span>
+                            <span v-if="log.inputTokens || log.outputTokens">
+                              token {{ log.inputTokens ?? 0 }} / {{ log.outputTokens ?? 0 }}
+                            </span>
+                          </div>
+
+                          <div v-if="log.inputSummary" class="ai-workflow-step-log__summary">
+                            <strong>输入：</strong>{{ log.inputSummary }}
+                          </div>
+
+                          <div v-if="log.outputSummary" class="ai-workflow-step-log__summary">
+                            <strong>输出：</strong>{{ log.outputSummary }}
+                          </div>
+
+                          <div v-if="log.errorMessage" class="ai-workflow-step-log__error">
+                            {{ log.errorMessage }}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 <div v-else-if="msg.role !== 'ai'" class="ai-msg-bubble">{{ msg.content }}</div>
                 <div class="ai-msg-meta">
                   <div v-if="msg.role === 'ai'" class="ai-msg-actions">
@@ -1193,8 +1906,196 @@ watch(visible, async (v) => {
           </div>
         </div>
 
-        <!-- 输入区 -->
-        <footer class="ai-input-area">
+        <!-- Workflow 过渡面板（点击同意/拒绝/完成/取消后，后端处理中） -->
+        <footer v-if="isTransitioning" class="ai-input-area">
+          <div class="ai-workflow-panel ai-workflow-panel--transition">
+            <n-spin size="small" />
+            <span class="ai-workflow-transition-label">{{ transitionLabel }}</span>
+          </div>
+        </footer>
+
+        <!-- Workflow 需求确认面板（无同意/不同意，直接输入） -->
+        <footer v-else-if="workflowNeedRequirement" class="ai-input-area">
+          <div class="ai-workflow-panel">
+            <div class="ai-workflow-head">
+              <span class="ai-workflow-badge">文章创作 Workflow</span>
+              <span class="ai-workflow-status">{{ workflowStatusLabel(activeWorkflow?.status) }}</span>
+            </div>
+
+            <div class="ai-workflow-reject">
+              <textarea
+                v-model="workflowFeedback"
+                class="ai-workflow-feedback"
+                rows="2"
+                :placeholder="activeWorkflow?.context?.clarification?.question ?? '请补充写作主题'"
+                :disabled="workflowBusy"
+              />
+              <div class="ai-workflow-reject-actions">
+                <button
+                  class="ai-workflow-btn ai-workflow-btn--ghost"
+                  type="button"
+                  :disabled="workflowBusy"
+                  @click="cancelWorkflow"
+                >
+                  取消工作流
+                </button>
+                <button
+                  class="ai-workflow-btn ai-workflow-btn--primary"
+                  type="button"
+                  :disabled="workflowBusy || !workflowFeedback.trim()"
+                  @click="rejectWorkflow"
+                >
+                  发送
+                </button>
+              </div>
+            </div>
+          </div>
+        </footer>
+
+        <!-- Workflow 确认面板（同意/不同意） -->
+        <footer v-else-if="workflowWaitingConfirm" class="ai-input-area">
+          <div class="ai-workflow-panel">
+            <div class="ai-workflow-head">
+              <span class="ai-workflow-badge">文章创作 Workflow</span>
+              <span
+                v-if="workflowDraftNeedsFix"
+                class="ai-workflow-status ai-workflow-status--bad"
+              >草稿未通过检查，请提修改意见</span>
+              <span v-else class="ai-workflow-status">{{ workflowStatusLabel(activeWorkflow?.status) }}</span>
+            </div>
+
+            <div v-if="workflowDraftNeedsFix || workflowRejectEditing" class="ai-workflow-reject">
+              <textarea
+                v-model="workflowFeedback"
+                class="ai-workflow-feedback"
+                rows="2"
+                :placeholder="workflowDraftNeedsFix ? '草稿未通过质量检查，请输入修改意见后重写' : '请输入修改意见...'"
+                :disabled="workflowBusy"
+              />
+              <div class="ai-workflow-reject-actions">
+                <button
+                  v-if="!workflowDraftNeedsFix"
+                  class="ai-workflow-btn ai-workflow-btn--ghost"
+                  type="button"
+                  :disabled="workflowBusy"
+                  @click="resetWorkflowRejectUI"
+                >
+                  取消
+                </button>
+                <button
+                  class="ai-workflow-btn ai-workflow-btn--no"
+                  type="button"
+                  :disabled="workflowBusy"
+                  @click="cancelWorkflow"
+                >
+                  取消工作流
+                </button>
+                <button
+                  class="ai-workflow-btn ai-workflow-btn--primary"
+                  type="button"
+                  :disabled="workflowBusy || !workflowFeedback.trim()"
+                  @click="rejectWorkflow"
+                >
+                  {{ workflowDraftNeedsFix ? '发送修改意见' : '发送' }}
+                </button>
+              </div>
+            </div>
+
+            <div v-else class="ai-workflow-actions">
+              <button
+                class="ai-workflow-btn ai-workflow-btn--ok"
+                type="button"
+                :disabled="workflowBusy || workflowHasBlockingIssues"
+                @click="approveWorkflow"
+              >
+                同意
+              </button>
+              <button
+                class="ai-workflow-btn ai-workflow-btn--no"
+                type="button"
+                :disabled="workflowBusy"
+                @click="workflowRejectEditing = true"
+              >
+                不同意
+              </button>
+              <button
+                class="ai-workflow-btn ai-workflow-btn--ghost"
+                type="button"
+                :disabled="workflowBusy"
+                @click="cancelWorkflow"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </footer>
+
+        <!-- Workflow 收口面板（编辑器已填充，等待保存/发布或取消） -->
+        <footer v-else-if="activeWorkflow?.status === 'WAITING_USER_SAVE'" class="ai-input-area">
+          <div class="ai-workflow-panel">
+            <div class="ai-workflow-head">
+              <span class="ai-workflow-badge">文章创作 Workflow</span>
+              <span class="ai-workflow-status">{{ workflowStatusLabel(activeWorkflow?.status) }}</span>
+            </div>
+
+            <div class="ai-workflow-actions">
+              <button
+                class="ai-workflow-btn ai-workflow-btn--ok"
+                type="button"
+                :disabled="workflowBusy"
+                @click="completeWorkflow"
+              >
+                已保存 / 发布
+              </button>
+              <button
+                class="ai-workflow-btn ai-workflow-btn--no"
+                type="button"
+                :disabled="workflowBusy"
+                @click="cancelWorkflow"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </footer>
+
+        <!-- Workflow 失败面板（可重试或取消） -->
+        <footer v-else-if="workflowFailed" class="ai-input-area">
+          <div class="ai-workflow-panel">
+            <div class="ai-workflow-head">
+              <span class="ai-workflow-badge">文章创作 Workflow</span>
+              <span class="ai-workflow-status ai-workflow-status--bad">
+                {{ workflowStatusLabel(activeWorkflow?.status) }}
+              </span>
+            </div>
+
+            <div v-if="activeWorkflow?.errorMessage" class="ai-workflow-error">
+              {{ activeWorkflow.errorMessage }}
+            </div>
+
+            <div class="ai-workflow-actions">
+              <button
+                class="ai-workflow-btn ai-workflow-btn--ok"
+                type="button"
+                :disabled="workflowBusy"
+                @click="retryWorkflow"
+              >
+                重试
+              </button>
+              <button
+                class="ai-workflow-btn ai-workflow-btn--no"
+                type="button"
+                :disabled="workflowBusy"
+                @click="cancelWorkflow"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </footer>
+
+        <!-- 普通输入区 -->
+        <footer v-else class="ai-input-area">
           <n-button
             size="small"
             quaternary
@@ -2500,6 +3401,368 @@ watch(visible, async (v) => {
   font-size: 12px;
   color: #bbb;
   margin-right: auto;
+}
+
+/* ============================================================
+   Workflow 面板
+   ============================================================ */
+
+.ai-workflow-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+.ai-workflow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ai-workflow-badge {
+  font-size: 12px;
+  font-weight: 700;
+  color: #2563eb;
+}
+
+.ai-workflow-status {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.ai-workflow-status--bad {
+  color: #dc2626;
+  font-weight: 600;
+}
+
+.ai-workflow-error {
+  padding: 8px 10px;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fef2f2;
+  color: #991b1b;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.ai-workflow-actions,
+.ai-workflow-reject-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.ai-workflow-btn {
+  min-width: 72px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ai-workflow-btn--ok {
+  background: #2563eb;
+  color: #fff;
+}
+
+.ai-workflow-btn--no {
+  background: #f3f4f6;
+  color: #111827;
+  border-color: #d1d5db;
+}
+
+.ai-workflow-btn--ghost {
+  background: #fff;
+  border-color: #d1d5db;
+  color: #374151;
+}
+
+.ai-workflow-btn--primary {
+  background: #dc2626;
+  color: #fff;
+}
+
+.ai-workflow-feedback {
+  width: 100%;
+  min-height: 64px;
+  padding: 8px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  resize: vertical;
+  font: inherit;
+}
+
+/* ---- 过渡面板 ---- */
+
+.ai-workflow-panel--transition {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px 0;
+}
+
+.ai-workflow-transition-label {
+  font-size: 14px;
+  color: #4b5563;
+}
+
+/* ============================================================
+   Workflow 消息卡片
+   ============================================================ */
+
+.ai-workflow-card {
+  margin-top: 8px;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  background: #f0f7ff;
+  overflow: hidden;
+}
+
+.ai-workflow-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #bfdbfe;
+  background: #e8f2fe;
+}
+
+.ai-workflow-card__badge {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+.ai-workflow-card__status {
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.ai-workflow-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.ai-workflow-card__label {
+  display: inline-block;
+  min-width: 56px;
+  margin-right: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6b7280;
+}
+
+.ai-workflow-card__step,
+.ai-workflow-card__topic {
+  font-size: 13px;
+  color: #1f2937;
+}
+
+.ai-workflow-card__outline {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #374151;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* 流式增长时在内部滚动，避免撑高外层消息列表把滚动条推到底部 */
+  max-height: 260px;
+  overflow: auto;
+}
+
+.ai-workflow-card__stream-content {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #374151;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.ai-workflow-card__summary p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #374151;
+}
+
+.ai-workflow-card__quality {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid #bfdbfe;
+  background: #fff;
+}
+
+.ai-workflow-card__quality--good {
+  color: #059669;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ai-workflow-card__quality--bad {
+  color: #dc2626;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ai-workflow-card__quality-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ai-workflow-card__quality-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #6b7280;
+}
+
+.ai-workflow-card__quality-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #374151;
+}
+
+/* ---- Workflow 步骤日志折叠区 ---- */
+
+.ai-workflow-step-log {
+  border-top: 1px solid #bfdbfe;
+  background: #fff;
+}
+
+.ai-workflow-step-log__toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  background: transparent;
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ai-workflow-step-log__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.ai-workflow-step-log__empty {
+  padding: 8px 0;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.ai-workflow-step-log__item {
+  padding: 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #f9fafb;
+}
+
+.ai-workflow-step-log__head,
+.ai-workflow-step-log__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ai-workflow-step-log__step {
+  font-size: 12px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.ai-workflow-step-log__type {
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 16px;
+  border-radius: 3px;
+}
+
+.ai-workflow-step-log__type.is-step {
+  color: #2563eb;
+  background: #eff6ff;
+}
+
+.ai-workflow-step-log__type.is-operation {
+  color: #7c3aed;
+  background: #f5f3ff;
+}
+
+.ai-workflow-step-log__status {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ai-workflow-step-log__status--success {
+  color: #059669;
+}
+
+.ai-workflow-step-log__status--failed {
+  color: #dc2626;
+}
+
+.ai-workflow-step-log__status--running {
+  color: #2563eb;
+}
+
+.ai-workflow-step-log__status--skipped {
+  color: #6b7280;
+}
+
+.ai-workflow-step-log__meta {
+  margin-top: 4px;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  color: #6b7280;
+  font-size: 11px;
+}
+
+.ai-workflow-step-log__summary {
+  margin-top: 6px;
+  color: #374151;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.ai-workflow-step-log__error {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: #fef2f2;
+  color: #991b1b;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
 }
 
 /* ============================================================

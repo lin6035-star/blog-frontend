@@ -1,12 +1,12 @@
 export interface Comment {
-  id: number
-  articleId: number
-  userId: number
+  id: string
+  articleId: string
+  userId: string
   nickname: string
   avatarUrl?: string | null
   content: string
-  rootId: number | null
-  parentId: number | null
+  rootId: string | null
+  parentId: string | null
   replyToNickname?: string | null
   ipLocation?: string | null
   likeCount: number

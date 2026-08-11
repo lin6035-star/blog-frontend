@@ -15,13 +15,13 @@ import CommentEditor from './CommentEditor.vue'
 const props = defineProps<{
   comment: Comment
   isReply?: boolean
-  currentUserId?: number
-  articleAuthorId?: number
-  likingCommentIds?: number[]
-  deletingCommentIds?: number[]
-  loadingReplyIds?: number[]
-  activeReplyId?: number | null
-  replySubmittingId?: number | null
+  currentUserId?: string
+  articleAuthorId?: string
+  likingCommentIds?: string[]
+  deletingCommentIds?: string[]
+  loadingReplyIds?: string[]
+  activeReplyId?: string | null
+  replySubmittingId?: string | null
 }>()
 
 const emit = defineEmits<{

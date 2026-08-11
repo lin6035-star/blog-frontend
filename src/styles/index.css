@@ -777,6 +777,7 @@ textarea {
   grid-template-columns: 56px minmax(0, 1fr) 260px;
   gap: 20px;
   align-items: start;
+  transition: grid-template-columns 0.35s ease;
 }
 
 .detail-sidebar {
@@ -824,6 +825,127 @@ textarea {
   opacity: 0.6;
 }
 
+/* ---- 左侧按钮交错收起 ---- */
+.detail-sidebar .detail-action-btn {
+  transition:
+    opacity 0.22s ease,
+    transform 0.22s ease;
+}
+
+.detail-sidebar.collapsed .detail-action-btn {
+  opacity: 0;
+  transform: translateX(-18px);
+  pointer-events: none;
+}
+
+/* ---- 左侧折叠按钮（外挂在 sidebar 右边缘，收藏按钮旁边） ---- */
+.detail-sidebar {
+  overflow: visible;
+}
+
+.detail-sidebar-toggle {
+  position: absolute;
+  right: -22px;
+  /* 垂直位置对齐第 2 个按钮（收藏）：60px(padding-top) + 56px(第1个按钮) + 14px(gap) + 28px(第2个按钮一半) */
+  top: 158px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 44px;
+  border: 1px solid var(--color-border);
+  border-radius: 0 4px 4px 0;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  cursor: pointer;
+  opacity: 0.5;
+  transition:
+    opacity 0.18s,
+    background 0.18s,
+    color 0.18s,
+    left 0.35s ease;
+}
+
+.detail-sidebar-toggle:hover {
+  opacity: 1;
+  background: var(--color-mint);
+  color: var(--color-forest);
+}
+
+/* sidebar 收起后按钮贴在左边缘 */
+.detail-sidebar.collapsed .detail-sidebar-toggle {
+  opacity: 0.85;
+  left: 4px;
+  right: auto;
+}
+
+/* ---- 右侧折叠按钮（在 right-rail 左边缘外，和左侧按钮同高） ---- */
+.detail-right-rail-toggle {
+  position: absolute;
+  left: -22px;
+  top: 158px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 44px;
+  border: 1px solid var(--color-border);
+  border-radius: 0 4px 4px 0;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  cursor: pointer;
+  opacity: 0.5;
+  transition:
+    opacity 0.18s,
+    background 0.18s,
+    color 0.18s,
+    left 0.35s ease;
+}
+
+.detail-right-rail-toggle:hover {
+  opacity: 1;
+  background: var(--color-mint);
+  color: var(--color-forest);
+}
+
+/* right-rail 收起后按钮出现在正文右侧 */
+.detail-right-rail.collapsed .detail-right-rail-toggle {
+  opacity: 0.85;
+  left: 4px;
+}
+
+/* ---- 右侧栏交错收起 ---- */
+.detail-author-card,
+.detail-outline-card {
+  transition:
+    opacity 0.25s ease,
+    transform 0.25s ease;
+}
+
+.detail-right-rail.collapsed .detail-author-card,
+.detail-right-rail.collapsed .detail-outline-card {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.detail-right-rail.collapsed .detail-author-card {
+  transform: translateX(18px);
+}
+
+.detail-right-rail.collapsed .detail-outline-card {
+  transform: translateX(18px);
+}
+
+/* ---- 响应式隐藏折叠按钮 ---- */
+@media (max-width: 900px) {
+  .detail-sidebar-toggle,
+  .detail-right-rail-toggle {
+    display: none;
+  }
+}
+
 .detail-main {
   min-width: 0;
 }
@@ -831,6 +953,10 @@ textarea {
 .detail-right-rail {
   position: sticky;
   top: 84px;
+  overflow: visible;
+}
+
+.detail-right-rail-scroll {
   display: grid;
   gap: 16px;
   max-height: calc(100vh - 104px);

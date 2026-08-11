@@ -24,7 +24,7 @@ const categories = ref<Category[]>([])
 const loading = ref(false)
 const loadingMore = ref(false)
 const loadMoreError = ref(false)
-const selectedCategoryId = ref(0)
+const selectedCategoryId = ref('0')
 const selectedSort = ref<ArticleSort>('recommend')
 const articleActionKeys = ref(new Set<string>())
 
@@ -41,13 +41,13 @@ const authSignature = computed(() =>
 )
 const loadedAuthSignature = ref('')
 
-const allCategory: Category = { id: 0, name: '综合', code: 'all', description: '全部内容' }
+const allCategory: Category = { id: '0', name: '综合', code: 'all', description: '全部内容' }
 
 const fallbackCategories: Category[] = [
-  { id: 1, name: 'AI / Agent', code: 'ai-agent', description: 'AI、Agent、coding agent 相关内容' },
-  { id: 2, name: 'Java 后端', code: 'java-backend', description: 'Java、Spring Boot、后端开发相关内容' },
-  { id: 3, name: '项目实战', code: 'project-practice', description: '项目开发、部署、踩坑记录' },
-  { id: 4, name: '随笔', code: 'notes', description: '临时想法、学习记录、杂谈' },
+  { id: '1', name: 'AI / Agent', code: 'ai-agent', description: 'AI、Agent、coding agent 相关内容' },
+  { id: '2', name: 'Java 后端', code: 'java-backend', description: 'Java、Spring Boot、后端开发相关内容' },
+  { id: '3', name: '项目实战', code: 'project-practice', description: '项目开发、部署、踩坑记录' },
+  { id: '4', name: '随笔', code: 'notes', description: '临时想法、学习记录、杂谈' },
 ]
 
 const categoryItems = computed(() =>
@@ -221,7 +221,7 @@ async function handleArticleFavorite(article: Article) {
   }
 }
 
-function goToAuthorProfile(authorId: number) {
+function goToAuthorProfile(authorId: string) {
   router.push(`/users/${authorId}`)
 }
 
