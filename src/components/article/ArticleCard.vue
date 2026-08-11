@@ -19,7 +19,7 @@ const emit = defineEmits<{
   open: [article: Article]
   like: [article: Article]
   favorite: [article: Article]
-  'author-click': [authorId: number]
+  'author-click': [authorId: string]
 }>()
 
 const authorDisplayName = computed(() =>

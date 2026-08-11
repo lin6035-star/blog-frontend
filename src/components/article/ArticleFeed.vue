@@ -21,7 +21,7 @@ const emit = defineEmits<{
   loadMore: []
   like: [article: Article]
   favorite: [article: Article]
-  'author-click': [authorId: number]
+  'author-click': [authorId: string]
 }>()
 
 const sortTabs: Array<{ label: string; value: ArticleSort }> = [

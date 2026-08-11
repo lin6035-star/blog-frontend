@@ -14,6 +14,7 @@ import {
 import { articleApi } from '@/api/article'
 import { publicUserApi } from '@/api/publicUser'
 import ArticleCard from '@/components/article/ArticleCard.vue'
+import AvatarPreviewModal from '@/components/common/AvatarPreviewModal.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { useLoginGuard } from '@/composables/useLoginGuard'
 import MainLayout from '@/layouts/MainLayout.vue'
@@ -38,6 +39,7 @@ const articleLoading = ref(false)
 const followBusy = ref(false)
 const articleActionKeys = ref(new Set<string>())
 const relationActionKeys = ref(new Set<string>())
+const avatarPreviewShow = ref(false)
 const currentPage = ref(1)
 const pageSize = 5
 const total = ref(0)
@@ -182,11 +184,11 @@ function goToArticle(article: Article) {
   router.push(`/articles/${article.id}`)
 }
 
-function goToAuthorProfile(authorId: number) {
+function goToAuthorProfile(authorId: string) {
   router.push(`/users/${authorId}`)
 }
 
-function goToUserProfile(userId: number) {
+function goToUserProfile(userId: number | string) {
   router.push(`/users/${userId}`)
 }
 
@@ -375,7 +377,7 @@ watch(
         <n-spin :show="profileLoading">
           <section class="public-profile-card">
             <template v-if="profile">
-              <n-avatar :size="96" :src="profile.avatarUrl" class="public-profile-avatar">
+              <n-avatar :size="96" :src="profile.avatarUrl" class="public-profile-avatar" @click="avatarPreviewShow = true">
                 <template #fallback>
                   <n-icon><Person /></n-icon>
                 </template>
@@ -520,6 +522,8 @@ watch(
         </div>
       </section>
     </div>
+
+    <AvatarPreviewModal v-model:show="avatarPreviewShow" :src="profile?.avatarUrl ?? ''" />
   </MainLayout>
 </template>
 
@@ -574,6 +578,7 @@ watch(
 
 .public-profile-avatar {
   flex-shrink: 0;
+  cursor: pointer;
 }
 
 .public-profile-identity {

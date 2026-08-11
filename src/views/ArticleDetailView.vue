@@ -4,6 +4,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import {
   ArrowBack,
+  ArrowUp,
+  ChevronBack,
+  ChevronForward,
   Eye,
   Heart,
   HeartOutline,
@@ -40,6 +43,14 @@ const authorProfile = ref<PublicUserInfo | null>(null)
 const followBusy = ref(false)
 const detailBackBarRef = ref<HTMLElement | null>(null)
 const isDetailBackBarStuck = ref(false)
+const leftCollapsed = ref(false)
+const rightCollapsed = ref(false)
+
+const gridColumns = computed(() => {
+  const left = leftCollapsed.value ? '0px' : '56px'
+  const right = rightCollapsed.value ? '0px' : '260px'
+  return `${left} minmax(0, 1fr) ${right}`
+})
 
 const renderedArticle = computed(() => {
   if (!article.value?.content) return null
@@ -99,6 +110,10 @@ function goBack() {
   }
 
   router.push({ path: '/', query: { refresh: String(Date.now()) } })
+}
+
+function scrollToTop() {
+  window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
 function updateDetailBackBarStuck() {
@@ -352,11 +367,12 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <div class="detail-layout">
-      <aside class="detail-sidebar">
+    <div class="detail-layout" :style="{ gridTemplateColumns: gridColumns }">
+      <aside class="detail-sidebar" :class="{ collapsed: leftCollapsed }">
         <button
           class="detail-action-btn"
           :class="{ active: liked }"
+          :style="{ transitionDelay: '0ms' }"
           type="button"
           :disabled="liking"
           @click="handleLike"
@@ -370,6 +386,7 @@ onBeforeUnmount(() => {
         <button
           class="detail-action-btn"
           :class="{ active: favorited }"
+          :style="{ transitionDelay: '50ms' }"
           type="button"
           :disabled="favoriting"
           @click="handleFavorite"
@@ -382,6 +399,7 @@ onBeforeUnmount(() => {
         </button>
         <button
           class="detail-action-btn share"
+          :style="{ transitionDelay: '100ms' }"
           type="button"
           @click="copyCurrentArticleLink"
         >
@@ -389,6 +407,31 @@ onBeforeUnmount(() => {
             <ShareSocialOutline />
           </n-icon>
           <span>{{ shareCount || 0 }}</span>
+        </button>
+        <button
+          class="detail-action-btn"
+          :style="{ transitionDelay: '150ms' }"
+          type="button"
+          title="回到顶部"
+          @click="scrollToTop"
+        >
+          <n-icon size="22">
+            <ArrowUp />
+          </n-icon>
+          <span>顶部</span>
+        </button>
+
+        <!-- 左侧折叠按钮 — 外挂在 sidebar 右边缘，收藏按钮旁边 -->
+        <button
+          class="detail-sidebar-toggle"
+          type="button"
+          :title="leftCollapsed ? '展开操作按钮' : '收起操作按钮'"
+          @click="leftCollapsed = !leftCollapsed"
+        >
+          <n-icon size="13">
+            <ChevronForward v-if="leftCollapsed" />
+            <ChevronBack v-else />
+          </n-icon>
         </button>
       </aside>
 
@@ -425,8 +468,9 @@ onBeforeUnmount(() => {
         </n-spin>
       </div>
 
-      <aside v-if="article" class="detail-right-rail">
-        <section class="detail-author-card">
+      <aside v-if="article" class="detail-right-rail" :class="{ collapsed: rightCollapsed }">
+        <div class="detail-right-rail-scroll">
+        <section class="detail-author-card" :style="{ transitionDelay: '0ms' }">
           <div class="detail-author-profile">
             <div class="detail-author-avatar" @click="goToAuthorProfile()">
               <img v-if="authorProfile?.avatarUrl" :src="authorProfile.avatarUrl" class="detail-author-avatar-img" alt="" />
@@ -461,7 +505,7 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-        <section class="detail-outline-card">
+        <section class="detail-outline-card" :style="{ transitionDelay: '80ms' }">
           <div class="detail-outline-header">
             <h3>内容纲要</h3>
             <span>{{ outlineItems.length }} 节</span>
@@ -482,6 +526,21 @@ onBeforeUnmount(() => {
 
           <p v-else class="detail-outline-empty">这篇文章暂时没有可生成目录的二级标题。</p>
         </section>
+
+        </div><!-- .detail-right-rail-scroll -->
+
+        <!-- 右侧折叠按钮 — 外挂在 right-rail 右边缘，名片和纲要之间 -->
+        <button
+          class="detail-right-rail-toggle"
+          type="button"
+          :title="rightCollapsed ? '展开侧边栏' : '收起侧边栏'"
+          @click="rightCollapsed = !rightCollapsed"
+        >
+          <n-icon size="13">
+            <ChevronBack v-if="rightCollapsed" />
+            <ChevronForward v-else />
+          </n-icon>
+        </button>
       </aside>
     </div>
   </MainLayout>

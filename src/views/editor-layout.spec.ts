@@ -29,7 +29,7 @@ describe('editor publish state actions', () => {
   })
 
   it('treats category changes as unsaved article edits', () => {
-    expect(editorView).toContain('const initialCategoryId = ref<number | null>(null)')
+    expect(editorView).toContain('const initialCategoryId = ref<string | null>(null)')
     expect(editorView).toContain('form.categoryId !== initialCategoryId.value')
     expect(editorView).toContain('initialCategoryId.value = form.categoryId')
   })

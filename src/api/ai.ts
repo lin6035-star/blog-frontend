@@ -46,6 +46,7 @@ export interface AiSession {
   title: string
   createdAt: string
   updatedAt: string
+  activeWorkflowRunId?: string
 }
 
 export interface AiMessage {
@@ -56,6 +57,8 @@ export interface AiMessage {
   pageContext?: string
   createdAt: string
   references?: ArticleRagReference[]
+  workflowRunId?: string
+  workflow?: AiWorkflowRun
 }
 
 export interface NavigateCommand {
@@ -87,6 +90,111 @@ export interface ArticleAction {
   content?: string
 }
 
+// ============================================================
+// Workflow 类型
+// ============================================================
+
+export type WorkflowStatus =
+  | 'RUNNING'
+  | 'WAITING_REQUIREMENT_CONFIRM'
+  | 'WAITING_OUTLINE_CONFIRM'
+  | 'WAITING_DRAFT_CONFIRM'
+  | 'WAITING_FILL_CONFIRM'
+  | 'WAITING_USER_SAVE'
+  | 'PAUSED'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED'
+
+export type WorkflowType = 'CREATE_ARTICLE'
+
+export type WorkflowStep =
+  | 'REQUIREMENT_ANALYZE'
+  | 'MEMORY_RETRIEVE'
+  | 'RAG_SEARCH'
+  | 'GENERATE_OUTLINE'
+  | 'GENERATE_DRAFT'
+  | 'QUALITY_CHECK'
+  | 'FILL_ARTICLE'
+
+export interface WorkflowFeedbackItem {
+  time: string
+  step: WorkflowStep
+  status: WorkflowStatus
+  userFeedback: string
+}
+
+export interface CreateArticleWorkflowContext {
+  workflowVersion: string
+  variables: {
+    articleType?: string
+    language?: string
+  }
+  requirement?: {
+    topic?: string
+    type?: string
+    keywords?: string[]
+  }
+  clarification?: {
+    required?: boolean
+    question?: string
+  }
+  memoryContext?: string
+  ragReferences?: ArticleRagReference[]
+  outline?: string
+  draft?: {
+    title?: string
+    summary?: string
+    content?: string
+    tags?: string[]
+  }
+  qualityCheck?: {
+    passed?: boolean
+    issues?: string[]
+    suggestions?: string[]
+  }
+  feedbackHistory?: WorkflowFeedbackItem[]
+}
+
+export interface AiWorkflowRun {
+  id: string
+  workflowType: WorkflowType
+  workflowVersion: string
+  status: WorkflowStatus
+  currentStep?: WorkflowStep
+  context: CreateArticleWorkflowContext
+  editorAction?: EditorAction
+  pauseReason?: string
+  errorMessage?: string
+}
+
+export interface AiWorkflowStepLog {
+  id: string
+  workflowRunId: string
+  /** 日志类型：OPERATION=操作级（确认/反馈/重试）/ STEP=步骤级（runStep 每步） */
+  logType?: 'OPERATION' | 'STEP' | string
+  stepOrder: number
+  step: WorkflowStep | string
+  status: 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SKIPPED' | string
+  retryCount?: number
+  inputSummary?: string
+  outputSummary?: string
+  errorMessage?: string
+  metadataJson?: string
+  startedAt: string
+  endedAt?: string
+  durationMs?: number
+  inputTokens?: number
+  outputTokens?: number
+  createdAt: string
+}
+
+export interface CreateArticleWorkflowRequest {
+  conversationId?: number | null
+  requirement: string
+  pageContext?: PageContext
+}
+
 export interface AiChatResult {
   session: AiSession
   userMessage: AiMessage
@@ -114,9 +222,45 @@ export interface StreamCallbacks {
     editorAction?: EditorAction,
     articleAction?: ArticleAction,
     references?: ArticleRagReference[],
+    workflow?: AiWorkflowRun,
   ) => void
   onError: (error: Error) => void
   /** 用户主动停止生成，前端自行处理（保留已输出内容） */
+  onAbort?: () => void
+}
+
+// ============================================================
+// Workflow 流式事件
+// ============================================================
+
+export interface WorkflowStepEvent {
+  workflowRunId: string
+  action?: string
+  step?: string
+  status: string
+  message?: string
+}
+
+export interface WorkflowContentDeltaEvent {
+  workflowRunId: string
+  step: string
+  field: string
+  delta: string
+}
+
+export interface WorkflowStreamResult {
+  workflow?: AiWorkflowRun
+  stepLogs?: AiWorkflowStepLog[]
+  editorAction?: EditorAction
+  message?: string
+}
+
+export interface WorkflowStreamCallbacks {
+  onStep?: (event: WorkflowStepEvent) => Promise<void> | void
+  onContentDelta?: (event: WorkflowContentDeltaEvent) => Promise<void> | void
+  onStop?: (data: WorkflowStreamResult) => Promise<void> | void
+  onWorkflowError?: (data: WorkflowStreamResult) => Promise<void> | void
+  onError: (error: Error) => void
   onAbort?: () => void
 }
 
@@ -129,6 +273,7 @@ interface AiSessionRaw {
   title: string
   createdAt: string
   updatedAt: string
+  activeWorkflowRunId?: string
 }
 
 interface AiMessageRaw {
@@ -139,6 +284,7 @@ interface AiMessageRaw {
   pageContext?: string
   createdAt: string
   references?: ArticleRagReference[]
+  workflowRunId?: string
 }
 
 // ============================================================
@@ -149,6 +295,7 @@ function mapMessage(m: AiMessageRaw): AiMessage {
   return {
     ...m,
     role: m.role === 'assistant' ? 'ai' : m.role,
+    workflowRunId: m.workflowRunId,
   }
 }
 
@@ -164,6 +311,10 @@ interface AiChatEventRaw {
 const EVENT_PARAM = 1003
 const EVENT_DATA = 1001
 const EVENT_STOP = 1002
+const EVENT_WORKFLOW_STEP = 2001
+const EVENT_WORKFLOW_STOP = 2002
+const EVENT_WORKFLOW_ERROR = 2003
+const EVENT_WORKFLOW_CONTENT_DELTA = 2004
 
 async function streamChat(
   sessionId: string | null,
@@ -256,6 +407,7 @@ async function streamChat(
               editorAction?: EditorAction
               articleAction?: ArticleAction
               references?: ArticleRagReference[]
+              workflow?: AiWorkflowRun
             }
 
             const assistantMessage = {
@@ -270,6 +422,7 @@ async function streamChat(
               data.editorAction,
               data.articleAction,
               data.references,
+              data.workflow,
             )
           }
         } catch {
@@ -280,6 +433,98 @@ async function streamChat(
 
     if (!stopped) {
       callbacks.onError(new Error('连接意外中断'))
+    }
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      callbacks.onAbort?.()
+      return
+    }
+    callbacks.onError(e instanceof Error ? e : new Error(String(e)))
+  } finally {
+    reader.cancel()
+  }
+}
+
+// ============================================================
+// SSE 流式 Workflow 操作（fetch + ReadableStream）
+// ============================================================
+
+async function streamWorkflowAction(
+  url: string,
+  body: Record<string, unknown> | undefined,
+  callbacks: WorkflowStreamCallbacks,
+  signal?: AbortSignal,
+): Promise<void> {
+  const token = localStorage.getItem('blog_token') ?? ''
+
+  let response: Response
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal,
+    })
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      callbacks.onAbort?.()
+      return
+    }
+    callbacks.onError(e instanceof Error ? e : new Error('网络请求失败'))
+    return
+  }
+
+  if (!response.ok) {
+    callbacks.onError(new Error(`请求失败 (${response.status})`))
+    return
+  }
+
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let stopped = false
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith('data:')) continue
+
+        const jsonStr = trimmed.slice(5).trim()
+        if (!jsonStr) continue
+
+        try {
+          const event: AiChatEventRaw = JSON.parse(jsonStr)
+
+          if (event.eventType === EVENT_WORKFLOW_STEP) {
+            await callbacks.onStep?.(event.eventData as WorkflowStepEvent)
+          } else if (event.eventType === EVENT_WORKFLOW_CONTENT_DELTA) {
+            await callbacks.onContentDelta?.(event.eventData as WorkflowContentDeltaEvent)
+          } else if (event.eventType === EVENT_WORKFLOW_STOP) {
+            stopped = true
+            await callbacks.onStop?.(event.eventData as WorkflowStreamResult)
+          } else if (event.eventType === EVENT_WORKFLOW_ERROR) {
+            stopped = true
+            await callbacks.onWorkflowError?.(event.eventData as WorkflowStreamResult)
+          }
+        } catch {
+          // 跳过解析失败的事件
+        }
+      }
+    }
+
+    if (!stopped) {
+      callbacks.onError(new Error('Workflow 连接意外中断'))
     }
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') {
@@ -360,6 +605,61 @@ export const aiApi = {
 
   /** 发送消息（SSE 流式） */
   streamChat,
+
+  /** 创建文章 Workflow */
+  createArticleWorkflow(data: CreateArticleWorkflowRequest) {
+    return request.post<AiWorkflowRun>('/ai/workflows/article/create', data)
+  },
+
+  /** 查询 Workflow 运行状态 */
+  getWorkflowRun(id: string) {
+    return request.get<AiWorkflowRun>(`/ai/workflows/${id}`)
+  },
+
+  /** 查询 Workflow 步骤执行日志 */
+  getWorkflowStepLogs(id: string) {
+    return request.get<AiWorkflowStepLog[]>(`/ai/workflows/${id}/steps`)
+  },
+
+  /** 同意 Workflow 当前步骤 */
+  approveWorkflow(id: string) {
+    return request.post<AiWorkflowRun>(`/ai/workflows/${id}/approve`)
+  },
+
+  /** 拒绝 Workflow 当前步骤并反馈 */
+  rejectWorkflow(id: string, feedback: string) {
+    return request.post<AiWorkflowRun>(`/ai/workflows/${id}/reject`, { feedback })
+  },
+
+  /** 重试失败的 Workflow 当前步骤 */
+  retryWorkflow(id: string) {
+    return request.post<AiWorkflowRun>(`/ai/workflows/${id}/retry`)
+  },
+
+  /** 同意 Workflow 当前步骤（SSE） */
+  streamApproveWorkflow(id: string, callbacks: WorkflowStreamCallbacks, signal?: AbortSignal) {
+    return streamWorkflowAction(`/api/ai/workflows/${id}/approve/stream`, undefined, callbacks, signal)
+  },
+
+  /** 拒绝 Workflow 当前步骤并反馈（SSE） */
+  streamRejectWorkflow(id: string, feedback: string, callbacks: WorkflowStreamCallbacks, signal?: AbortSignal) {
+    return streamWorkflowAction(`/api/ai/workflows/${id}/reject/stream`, { feedback }, callbacks, signal)
+  },
+
+  /** 重试失败的 Workflow 当前步骤（SSE） */
+  streamRetryWorkflow(id: string, callbacks: WorkflowStreamCallbacks, signal?: AbortSignal) {
+    return streamWorkflowAction(`/api/ai/workflows/${id}/retry/stream`, undefined, callbacks, signal)
+  },
+
+  /** 完成 Workflow（编辑器已保存/发布后收口） */
+  completeWorkflow(id: string) {
+    return request.post<AiWorkflowRun>(`/ai/workflows/${id}/complete`)
+  },
+
+  /** 取消 Workflow */
+  cancelWorkflow(id: string) {
+    return request.post<void>(`/ai/workflows/${id}/cancel`)
+  },
 
   // 【已废弃】非流式接口，前端已全面切到流式，暂时注释，后续删除
   // async chat(sessionId: string | null, message: string, pageContext?: PageContext) {

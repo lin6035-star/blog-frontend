@@ -5,9 +5,9 @@ import CommentEditor from './CommentEditor.vue'
 import CommentItem from './CommentItem.vue'
 
 const comment: Comment = {
-  id: 12,
-  articleId: 1,
-  userId: 2,
+  id: '12',
+  articleId: '1',
+  userId: '2',
   nickname: '测试用户',
   avatarUrl: null,
   content: '评论内容',

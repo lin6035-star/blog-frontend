@@ -3,7 +3,7 @@ import type { Article } from '@/types/article'
 import type { PageData } from '@/types/result'
 
 export interface ArticleForm {
-  categoryId: number | null
+  categoryId: string | null
   title: string
   summary: string
   content: string
@@ -36,7 +36,7 @@ export const myArticleApi = {
     return request.get<Article>(`/users/me/articles/${id}`)
   },
   create(data: ArticleForm) {
-    return request.post<number>('/users/me/articles', data)
+    return request.post<string>('/users/me/articles', data)
   },
   update(id: number | string, data: ArticleForm) {
     return request.put(`/users/me/articles/${id}`, data)

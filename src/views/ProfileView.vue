@@ -17,6 +17,7 @@ import { myArticleApi } from '@/api/myArticle'
 import { publicUserApi } from '@/api/publicUser'
 import { ARTICLE_STATUS, getArticleStatusLabel } from '@/constants/articleStatus'
 import { userApi } from '@/api/user'
+import AvatarPreviewModal from '@/components/common/AvatarPreviewModal.vue'
 import MainLayout from '@/layouts/MainLayout.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { Article } from '@/types/article'
@@ -37,6 +38,8 @@ const profileLoading = ref(false)
 const uploading = ref(false)
 const profileEditVisible = ref(false)
 const profileSaving = ref(false)
+const avatarPreviewShow = ref(false)
+
 const profileForm = reactive({
   nickname: '',
   bio: '',
@@ -145,7 +148,7 @@ function goToArticle(article: Article) {
 }
 
 /* ---- 关注列表操作 ---- */
-function goToUserProfile(userId: number) {
+function goToUserProfile(userId: number | string) {
   router.push(`/users/${userId}`)
 }
 
@@ -339,7 +342,7 @@ onMounted(() => {
       <div class="profile-top-row">
         <section class="profile-hero-card">
           <div class="profile-avatar-wrap">
-            <n-avatar :size="96" :src="user?.avatarUrl">
+            <n-avatar :size="96" :src="user?.avatarUrl" class="profile-avatar-img" @click="avatarPreviewShow = true">
               <template #fallback>
                 <n-icon><Person /></n-icon>
               </template>
@@ -575,6 +578,8 @@ onMounted(() => {
         </div>
       </template>
     </n-modal>
+
+    <AvatarPreviewModal v-model:show="avatarPreviewShow" :src="user?.avatarUrl ?? ''" />
   </MainLayout>
 </template>
 
@@ -635,6 +640,10 @@ onMounted(() => {
   width: 96px;
   height: 96px;
   flex-shrink: 0;
+}
+
+.profile-avatar-img {
+  cursor: pointer;
 }
 
 .avatar-action {

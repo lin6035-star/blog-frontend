@@ -15,7 +15,7 @@ export interface CommentReplyListParams {
 
 export interface CommentCreatePayload {
   content: string
-  parentId: number | null
+  parentId: string | null
 }
 
 export const commentApi = {

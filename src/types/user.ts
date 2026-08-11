@@ -1,5 +1,5 @@
 export interface UsersVO {
-  id: number
+  id: string
   username: string
   nickname: string
   avatarUrl: string

@@ -22,7 +22,7 @@ const dialog = useDialog()
 /* ---- 编辑模式 ---- */
 const editId = computed(() => {
   const id = route.params.id
-  return id ? Number(id) : null
+  return id ? String(id) : null
 })
 const isEditingPublished = computed(
   () => editId.value !== null && form.status === ARTICLE_STATUS.PUBLISHED,
@@ -40,7 +40,7 @@ const form = reactive<ArticleForm>({
 const initialContent = ref('')
 const initialTitle = ref('')
 const initialCoverUrl = ref('')
-const initialCategoryId = ref<number | null>(null)
+const initialCategoryId = ref<string | null>(null)
 const saving = ref(false)
 
 /* ---- 分类 ---- */

@@ -1,5 +1,5 @@
 export interface PublicUserInfo {
-  id: number
+  id: string
   nickname: string
   avatarUrl?: string
   bio?: string
@@ -12,7 +12,7 @@ export interface PublicUserInfo {
 }
 
 export interface UserRelation {
-  id: number
+  id: string
   nickname: string
   avatarUrl?: string
   bio?: string
