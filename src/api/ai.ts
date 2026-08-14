@@ -59,6 +59,8 @@ export interface AiMessage {
   references?: ArticleRagReference[]
   workflowRunId?: string
   workflow?: AiWorkflowRun
+  /** 前端临时状态：该消息刚被复制过（按钮短暂显示 ✔） */
+  copied?: boolean
 }
 
 export interface NavigateCommand {
@@ -72,6 +74,7 @@ export interface EditorAction {
   categoryName?: string
   summary?: string
   content?: string
+  articleId?: number
 }
 
 export interface ArticleAction {
@@ -99,6 +102,7 @@ export type WorkflowStatus =
   | 'WAITING_REQUIREMENT_CONFIRM'
   | 'WAITING_OUTLINE_CONFIRM'
   | 'WAITING_DRAFT_CONFIRM'
+  | 'WAITING_PLAN_CONFIRM'
   | 'WAITING_FILL_CONFIRM'
   | 'WAITING_USER_SAVE'
   | 'PAUSED'
@@ -106,7 +110,7 @@ export type WorkflowStatus =
   | 'FAILED'
   | 'CANCELLED'
 
-export type WorkflowType = 'CREATE_ARTICLE'
+export type WorkflowType = 'CREATE_ARTICLE' | 'OPTIMIZE_ARTICLE'
 
 export type WorkflowStep =
   | 'REQUIREMENT_ANALYZE'
@@ -116,6 +120,11 @@ export type WorkflowStep =
   | 'GENERATE_DRAFT'
   | 'QUALITY_CHECK'
   | 'FILL_ARTICLE'
+  | 'LOAD_ARTICLE'
+  | 'ANALYZE_ARTICLE'
+  | 'GENERATE_OPTIMIZATION_PLAN'
+  | 'REWRITE_ARTICLE'
+  | 'CONTENT_CHECK'
 
 export interface WorkflowFeedbackItem {
   time: string
@@ -156,13 +165,50 @@ export interface CreateArticleWorkflowContext {
   feedbackHistory?: WorkflowFeedbackItem[]
 }
 
+export interface OptimizeArticleWorkflowContext {
+  workflowVersion: string
+  input?: {
+    articleId?: number
+    instruction?: string
+  }
+  memoryContext?: string
+  ragContext?: {
+    references?: ArticleRagReference[]
+  }
+  stepResults?: {
+    article?: {
+      id?: number
+      title?: string
+      summary?: string
+      content?: string
+      categoryId?: number
+      status?: number
+    }
+    analysis?: {
+      contentLength?: number
+      paragraphCount?: number
+      codeBlockCount?: number
+      imageCount?: number
+      issues?: string[]
+    }
+    optimizationPlan?: string
+    optimizedContent?: string
+    contentCheck?: {
+      passed?: boolean
+      issues?: string[]
+      suggestions?: string[]
+    }
+  }
+  feedbackHistory?: WorkflowFeedbackItem[]
+}
+
 export interface AiWorkflowRun {
   id: string
   workflowType: WorkflowType
   workflowVersion: string
   status: WorkflowStatus
   currentStep?: WorkflowStep
-  context: CreateArticleWorkflowContext
+  context: CreateArticleWorkflowContext & OptimizeArticleWorkflowContext
   editorAction?: EditorAction
   pauseReason?: string
   errorMessage?: string
@@ -192,6 +238,13 @@ export interface AiWorkflowStepLog {
 export interface CreateArticleWorkflowRequest {
   conversationId?: number | null
   requirement: string
+  pageContext?: PageContext
+}
+
+export interface OptimizeArticleWorkflowRequest {
+  conversationId?: number | null
+  articleId: number
+  instruction?: string
   pageContext?: PageContext
 }
 
@@ -609,6 +662,11 @@ export const aiApi = {
   /** 创建文章 Workflow */
   createArticleWorkflow(data: CreateArticleWorkflowRequest) {
     return request.post<AiWorkflowRun>('/ai/workflows/article/create', data)
+  },
+
+  /** 创建文章优化 Workflow */
+  createArticleOptimizeWorkflow(data: OptimizeArticleWorkflowRequest) {
+    return request.post<AiWorkflowRun>('/ai/workflows/article/optimize', data)
   },
 
   /** 查询 Workflow 运行状态 */

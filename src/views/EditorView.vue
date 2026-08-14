@@ -43,6 +43,10 @@ const initialCoverUrl = ref('')
 const initialCategoryId = ref<string | null>(null)
 const saving = ref(false)
 
+/* ---- AI 填充竞态保护：编辑模式下原文未加载完时暂存，防止优化内容被原文覆盖 ---- */
+const articleLoaded = ref(false)
+let pendingFillAction: EditorAction | null = null
+
 /* ---- 分类 ---- */
 const DEFAULT_CATEGORY_CODE = 'notes'
 const DEFAULT_CATEGORY_NAME = '随笔'
@@ -166,6 +170,12 @@ async function saveArticle(
 /* ---- 保存草稿 ---- */
 async function handleAiEditorAction(action: EditorAction) {
   if (action.type === 'fillArticle') {
+    // 编辑模式：原文还没加载完时先暂存，等 getDetail 完成后再填充，防止原文覆盖优化内容
+    if (editId.value && !articleLoaded.value) {
+      pendingFillAction = action
+      return
+    }
+
     if (action.title) form.title = action.title
     if (action.content) form.content = action.content
     if (action.summary) form.summary = action.summary
@@ -257,10 +267,19 @@ onMounted(async () => {
       initialTitle.value = article.title
       initialCoverUrl.value = article.coverUrl
       initialCategoryId.value = article.categoryId
+
+      articleLoaded.value = true
+      // 处理在原文加载期间到达的 AI 填充
+      if (pendingFillAction) {
+        await handleAiEditorAction(pendingFillAction)
+        pendingFillAction = null
+      }
     } catch {
       message.error('文章加载失败')
       router.back()
     }
+  } else {
+    articleLoaded.value = true
   }
 })
 
