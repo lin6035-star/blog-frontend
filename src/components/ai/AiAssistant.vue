@@ -13,6 +13,7 @@ import {
   Time,
   TrashOutline,
   CopyOutline,
+  CheckmarkOutline,
   RefreshOutline,
   StopCircleOutline,
 } from '@vicons/ionicons5'
@@ -189,6 +190,7 @@ const workflowWaitingConfirm = computed(() => {
   const status = activeWorkflow.value?.status
   return (
     status === 'WAITING_OUTLINE_CONFIRM' ||
+    status === 'WAITING_PLAN_CONFIRM' ||
     status === 'WAITING_DRAFT_CONFIRM' ||
     status === 'WAITING_FILL_CONFIRM'
   )
@@ -202,7 +204,10 @@ const workflowFailed = computed(() => {
   return activeWorkflow.value?.status === 'FAILED'
 })
 
-const workflowQualityCheck = computed(() => activeWorkflow.value?.context?.qualityCheck ?? null)
+const workflowQualityCheck = computed(() => {
+  const ctx = activeWorkflow.value?.context
+  return ctx?.stepResults?.contentCheck ?? ctx?.qualityCheck ?? null
+})
 
 const workflowHasBlockingIssues = computed(() => {
   const check = workflowQualityCheck.value
@@ -221,6 +226,7 @@ const workflowDraftNeedsFix = computed(() => {
 function workflowStatusLabel(status?: WorkflowStatus) {
   if (status === 'WAITING_REQUIREMENT_CONFIRM') return '等待补充需求'
   if (status === 'WAITING_OUTLINE_CONFIRM') return '等待确认大纲'
+  if (status === 'WAITING_PLAN_CONFIRM') return '等待确认优化方案'
   if (status === 'WAITING_DRAFT_CONFIRM') return '等待确认草稿'
   if (status === 'WAITING_FILL_CONFIRM') return '等待填充编辑器'
   if (status === 'WAITING_USER_SAVE') return '已填充编辑器，等待保存/发布'
@@ -239,6 +245,11 @@ function workflowStepLabel(step?: string) {
   if (step === 'GENERATE_DRAFT') return '生成草稿'
   if (step === 'QUALITY_CHECK') return '质量检查'
   if (step === 'FILL_ARTICLE') return '填充编辑器'
+  if (step === 'LOAD_ARTICLE') return '加载文章'
+  if (step === 'ANALYZE_ARTICLE') return '分析文章'
+  if (step === 'GENERATE_OPTIMIZATION_PLAN') return '生成优化方案'
+  if (step === 'REWRITE_ARTICLE') return '重写文章'
+  if (step === 'CONTENT_CHECK') return '内容检查'
   // stream 占位日志兜底：后端没推断出 step 时显示 action
   if (step === 'APPROVE') return '确认推进'
   if (step === 'REJECT') return '按反馈重新生成'
@@ -291,6 +302,30 @@ function formatWorkflowQualityCheck(check?: {
 }
 
 function buildWorkflowSnapshotContent(workflow: AiWorkflowRun) {
+  // 文章优化 Workflow：显示优化方案 / 优化稿
+  if (workflow.workflowType === 'OPTIMIZE_ARTICLE') {
+    const stepResults = workflow.context?.stepResults
+    const plan = stepResults?.optimizationPlan?.trim()
+    const optimizedContent = stepResults?.optimizedContent?.trim()
+    const qualityText = formatWorkflowQualityCheck(stepResults?.contentCheck)
+
+    if (workflow.status === 'WAITING_PLAN_CONFIRM') {
+      return plan || '已进入文章优化 Workflow，正在生成优化方案。'
+    }
+
+    if (
+      workflow.status === 'WAITING_DRAFT_CONFIRM' ||
+      workflow.status === 'WAITING_USER_SAVE' ||
+      workflow.status === 'COMPLETED'
+    ) {
+      return [optimizedContent, qualityText].filter(Boolean).join('\n\n') ||
+        '已进入文章优化 Workflow，正在重写文章。'
+    }
+
+    return `Workflow 状态：${workflow.status}`
+  }
+
+  // 文章创作 Workflow：原有逻辑
   const requirement = workflow.context?.requirement?.topic?.trim() || '文章'
   const outline = workflow.context?.outline?.trim()
   const draft = workflow.context?.draft
@@ -519,17 +554,17 @@ function clearSessionActiveWorkflow(workflowId?: string) {
   }
 }
 
-/** 流式 delta：draft.content 累积正文，outline 累积大纲 */
+/** 流式 delta：按 field 分派——创作走 draft.content / outline，优化走 optimizedContent / optimizationPlan */
 function applyWorkflowContentDelta(event: WorkflowContentDeltaEvent) {
   if (!event.workflowRunId) return
 
-  if (event.field === 'draft.content') {
+  if (event.field === 'draft.content' || event.field === 'optimizedContent') {
     const old = workflowStreamingContent.value[event.workflowRunId] ?? ''
     workflowStreamingContent.value[event.workflowRunId] = old + (event.delta ?? '')
     return
   }
 
-  if (event.field === 'outline') {
+  if (event.field === 'outline' || event.field === 'optimizationPlan') {
     const old = workflowStreamingOutline.value[event.workflowRunId] ?? ''
     workflowStreamingOutline.value[event.workflowRunId] = old + (event.delta ?? '')
   }
@@ -1064,12 +1099,24 @@ async function handleEditorAction(action: EditorAction) {
   const inEditor = routeName === 'editor-new' || routeName === 'editor-edit'
 
   if (action.type === 'fillArticle') {
-    if (!inEditor) {
+    const targetArticleId = action.articleId ? String(action.articleId) : ''
+
+    if (targetArticleId) {
+      const alreadyEditingTarget =
+        routeName === 'editor-edit' &&
+        String(router.currentRoute.value.params.id ?? '') === targetArticleId
+
+      if (!alreadyEditingTarget) {
+        await router.push({ name: 'editor-edit', params: { id: targetArticleId } })
+        await nextTick()
+      }
+    } else if (!inEditor) {
       await router.push('/editor')
       await nextTick()
     }
+
     emitAiEditorAction(action)
-    message.success('已填入编辑器')
+    message.success(targetArticleId ? '已填入原文章编辑器' : '已填入编辑器')
     return
   }
 
@@ -1282,6 +1329,10 @@ async function send(text?: string, skipUserMessage = false) {
 async function copyMessage(msg: AiMessage) {
   try {
     await navigator.clipboard.writeText(msg.content)
+    msg.copied = true
+    setTimeout(() => {
+      msg.copied = false
+    }, 1500)
     message.success('已复制')
   } catch {
     message.error('复制失败')
@@ -1746,7 +1797,9 @@ watch(visible, async (v) => {
                 <!-- Workflow 卡片 -->
                 <div v-if="msg.role === 'ai' && msg.workflow" class="ai-workflow-card">
                   <div class="ai-workflow-card__head">
-                    <span class="ai-workflow-card__badge">文章创作 Workflow</span>
+                    <span class="ai-workflow-card__badge">
+                      {{ msg.workflow.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : '文章创作 Workflow' }}
+                    </span>
                     <span class="ai-workflow-card__status">
                       <template v-if="msg.workflow.id === activeWorkflow?.id && isTransitioning">
                         <n-spin size="14" /> {{ transitionLabel }}
@@ -1759,9 +1812,17 @@ watch(visible, async (v) => {
                       <span class="ai-workflow-card__label">当前步骤</span>
                       <span>{{ workflowStepLabel(msg.workflow.currentStep) }}</span>
                     </div>
+                    <!-- ===== 创作 Workflow ===== -->
+                    <template v-if="msg.workflow.workflowType !== 'OPTIMIZE_ARTICLE'">
                     <div v-if="msg.workflow.context?.requirement?.topic" class="ai-workflow-card__topic">
                       <span class="ai-workflow-card__label">主题</span>
                       <span>{{ msg.workflow.context.requirement.topic }}</span>
+                    </div>
+                    <div
+                      v-if="workflowStreamingOutline[msg.workflow.id] || msg.workflow.context?.outline"
+                      class="ai-workflow-card__section-title"
+                    >
+                      大纲：
                     </div>
                     <pre
                       v-if="workflowStreamingOutline[msg.workflow.id]"
@@ -1775,11 +1836,20 @@ watch(visible, async (v) => {
                       <span class="ai-workflow-card__label">草稿摘要</span>
                       <p>{{ msg.workflow.context.draft.summary }}</p>
                     </div>
-                    <!-- 流式正文预览：生成草稿时实时显示 -->
+                    <div
+                      v-if="workflowStreamingContent[msg.workflow.id] || msg.workflow.context?.draft?.content"
+                      class="ai-workflow-card__section-title"
+                    >
+                      草稿：
+                    </div>
                     <pre
                       v-if="workflowStreamingContent[msg.workflow.id]"
                       class="ai-workflow-card__stream-content"
                     >{{ workflowStreamingContent[msg.workflow.id] }}</pre>
+                    <pre
+                      v-else-if="msg.workflow.context?.draft?.content"
+                      class="ai-workflow-card__stream-content"
+                    >{{ msg.workflow.context.draft.content }}</pre>
                     <div v-if="msg.workflow.context?.qualityCheck && msg.workflow.context.qualityCheck.passed !== undefined" class="ai-workflow-card__quality">
                       <span class="ai-workflow-card__label">质量检查</span>
                       <span :class="msg.workflow.context.qualityCheck.passed === false ? 'ai-workflow-card__quality--bad' : 'ai-workflow-card__quality--good'">
@@ -1804,6 +1874,67 @@ watch(visible, async (v) => {
                         </ul>
                       </div>
                     </div>
+                    </template>
+
+                    <!-- ===== 优化 Workflow ===== -->
+                    <template v-else>
+                    <div v-if="msg.workflow.context?.stepResults?.article?.title" class="ai-workflow-card__topic">
+                      <span class="ai-workflow-card__label">优化文章</span>
+                      <span>{{ msg.workflow.context.stepResults.article.title }}</span>
+                    </div>
+                    <div
+                      v-if="workflowStreamingOutline[msg.workflow.id] || msg.workflow.context?.stepResults?.optimizationPlan"
+                      class="ai-workflow-card__section-title"
+                    >
+                      优化方案：
+                    </div>
+                    <pre
+                      v-if="workflowStreamingOutline[msg.workflow.id]"
+                      class="ai-workflow-card__outline"
+                    >{{ workflowStreamingOutline[msg.workflow.id] }}</pre>
+                    <pre
+                      v-else-if="msg.workflow.context?.stepResults?.optimizationPlan"
+                      class="ai-workflow-card__outline"
+                    >{{ msg.workflow.context.stepResults.optimizationPlan }}</pre>
+                    <div
+                      v-if="workflowStreamingContent[msg.workflow.id] || msg.workflow.context?.stepResults?.optimizedContent"
+                      class="ai-workflow-card__section-title"
+                    >
+                      优化草稿：
+                    </div>
+                    <pre
+                      v-if="workflowStreamingContent[msg.workflow.id]"
+                      class="ai-workflow-card__stream-content"
+                    >{{ workflowStreamingContent[msg.workflow.id] }}</pre>
+                    <pre
+                      v-else-if="msg.workflow.context?.stepResults?.optimizedContent"
+                      class="ai-workflow-card__stream-content"
+                    >{{ msg.workflow.context.stepResults.optimizedContent }}</pre>
+                    <div v-if="msg.workflow.context?.stepResults?.contentCheck && msg.workflow.context.stepResults.contentCheck.passed !== undefined" class="ai-workflow-card__quality">
+                      <span class="ai-workflow-card__label">内容检查</span>
+                      <span :class="msg.workflow.context.stepResults.contentCheck.passed === false ? 'ai-workflow-card__quality--bad' : 'ai-workflow-card__quality--good'">
+                        {{ msg.workflow.context.stepResults.contentCheck.passed === false ? '未通过' : '通过' }}
+                      </span>
+
+                      <div v-if="msg.workflow.context.stepResults.contentCheck.issues?.length" class="ai-workflow-card__quality-block">
+                        <div class="ai-workflow-card__quality-title">问题</div>
+                        <ul class="ai-workflow-card__quality-list">
+                          <li v-for="(item, index) in msg.workflow.context.stepResults.contentCheck.issues" :key="index">
+                            {{ item }}
+                          </li>
+                        </ul>
+                      </div>
+
+                      <div v-if="msg.workflow.context.stepResults.contentCheck.suggestions?.length" class="ai-workflow-card__quality-block">
+                        <div class="ai-workflow-card__quality-title">建议</div>
+                        <ul class="ai-workflow-card__quality-list">
+                          <li v-for="(item, index) in msg.workflow.context.stepResults.contentCheck.suggestions" :key="index">
+                            {{ item }}
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
+                    </template>
 
                     <!-- 执行详情（步骤日志，点开才加载） -->
                     <div class="ai-workflow-step-log">
@@ -1884,8 +2015,13 @@ watch(visible, async (v) => {
                 <div v-else-if="msg.role !== 'ai'" class="ai-msg-bubble">{{ msg.content }}</div>
                 <div class="ai-msg-meta">
                   <div v-if="msg.role === 'ai'" class="ai-msg-actions">
-                    <button class="ai-msg-action-btn" title="复制" @click="copyMessage(msg)">
-                      <n-icon :component="CopyOutline" size="15" />
+                    <button
+                      class="ai-msg-action-btn"
+                      :class="{ 'is-copied': msg.copied }"
+                      title="复制"
+                      @click="copyMessage(msg)"
+                    >
+                      <n-icon :component="msg.copied ? CheckmarkOutline : CopyOutline" size="15" />
                     </button>
                     <button class="ai-msg-action-btn" title="重新生成" @click="regenerate(i)">
                       <n-icon :component="RefreshOutline" size="15" />
@@ -1895,6 +2031,14 @@ watch(visible, async (v) => {
                     </button>
                   </div>
                   <div v-else class="ai-msg-actions">
+                    <button
+                      class="ai-msg-action-btn"
+                      :class="{ 'is-copied': msg.copied }"
+                      title="复制"
+                      @click="copyMessage(msg)"
+                    >
+                      <n-icon :component="msg.copied ? CheckmarkOutline : CopyOutline" size="15" />
+                    </button>
                     <button class="ai-msg-action-btn" title="删除" @click="deleteMessage(i)">
                       <n-icon :component="TrashOutline" size="15" />
                     </button>
@@ -1918,7 +2062,9 @@ watch(visible, async (v) => {
         <footer v-else-if="workflowNeedRequirement" class="ai-input-area">
           <div class="ai-workflow-panel">
             <div class="ai-workflow-head">
-              <span class="ai-workflow-badge">文章创作 Workflow</span>
+              <span class="ai-workflow-badge">
+                {{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : '文章创作 Workflow' }}
+              </span>
               <span class="ai-workflow-status">{{ workflowStatusLabel(activeWorkflow?.status) }}</span>
             </div>
 
@@ -1956,11 +2102,13 @@ watch(visible, async (v) => {
         <footer v-else-if="workflowWaitingConfirm" class="ai-input-area">
           <div class="ai-workflow-panel">
             <div class="ai-workflow-head">
-              <span class="ai-workflow-badge">文章创作 Workflow</span>
+              <span class="ai-workflow-badge">
+                {{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : '文章创作 Workflow' }}
+              </span>
               <span
                 v-if="workflowDraftNeedsFix"
                 class="ai-workflow-status ai-workflow-status--bad"
-              >草稿未通过检查，请提修改意见</span>
+              >{{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '优化结果未通过检查，请提修改意见' : '草稿未通过检查，请提修改意见' }}</span>
               <span v-else class="ai-workflow-status">{{ workflowStatusLabel(activeWorkflow?.status) }}</span>
             </div>
 
@@ -1969,7 +2117,11 @@ watch(visible, async (v) => {
                 v-model="workflowFeedback"
                 class="ai-workflow-feedback"
                 rows="2"
-                :placeholder="workflowDraftNeedsFix ? '草稿未通过质量检查，请输入修改意见后重写' : '请输入修改意见...'"
+                :placeholder="workflowDraftNeedsFix
+                  ? (activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE'
+                    ? '优化结果未通过检查，请输入修改意见后重写'
+                    : '草稿未通过质量检查，请输入修改意见后重写')
+                  : '请输入修改意见...'"
                 :disabled="workflowBusy"
               />
               <div class="ai-workflow-reject-actions">
@@ -2034,7 +2186,9 @@ watch(visible, async (v) => {
         <footer v-else-if="activeWorkflow?.status === 'WAITING_USER_SAVE'" class="ai-input-area">
           <div class="ai-workflow-panel">
             <div class="ai-workflow-head">
-              <span class="ai-workflow-badge">文章创作 Workflow</span>
+              <span class="ai-workflow-badge">
+                {{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : '文章创作 Workflow' }}
+              </span>
               <span class="ai-workflow-status">{{ workflowStatusLabel(activeWorkflow?.status) }}</span>
             </div>
 
@@ -2063,7 +2217,9 @@ watch(visible, async (v) => {
         <footer v-else-if="workflowFailed" class="ai-input-area">
           <div class="ai-workflow-panel">
             <div class="ai-workflow-head">
-              <span class="ai-workflow-badge">文章创作 Workflow</span>
+              <span class="ai-workflow-badge">
+                {{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : '文章创作 Workflow' }}
+              </span>
               <span class="ai-workflow-status ai-workflow-status--bad">
                 {{ workflowStatusLabel(activeWorkflow?.status) }}
               </span>
@@ -2770,6 +2926,13 @@ watch(visible, async (v) => {
   color: #2f6f73;
   border-color: #2f6f73;
   background: #f0f9f9;
+}
+
+.ai-msg-action-btn.is-copied,
+.ai-msg-action-btn.is-copied:hover {
+  color: #18a058;
+  border-color: #18a058;
+  background: #f0faf4;
 }
 
 .ai-msg-time {
@@ -3564,6 +3727,16 @@ watch(visible, async (v) => {
 .ai-workflow-card__topic {
   font-size: 13px;
   color: #1f2937;
+}
+
+.ai-workflow-card__section-title {
+  margin: 6px 0 -2px;
+  padding-left: 8px;
+  border-left: 3px solid #2563eb;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.4;
+  color: #2563eb;
 }
 
 .ai-workflow-card__outline {

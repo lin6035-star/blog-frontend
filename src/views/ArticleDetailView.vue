@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import {
@@ -342,6 +342,20 @@ onMounted(() => {
   registerAiArticleActionHandler(handleAiArticleAction)
 })
 
+// 详情页之间跳转（如点击 AI 引用片段）复用同一组件，onMounted 不会触发，
+// 需要监听路由参数变化重新加载文章
+watch(
+  () => route.params.id,
+  (newId, oldId) => {
+    if (!newId || newId === oldId) return
+    loadArticle()
+    nextTick(() => {
+      window.scrollTo(0, 0)
+      updateDetailBackBarStuck()
+    })
+  },
+)
+
 onBeforeUnmount(() => {
   window.removeEventListener('scroll', updateDetailBackBarStuck)
   window.removeEventListener('resize', updateDetailBackBarStuck)
@@ -450,6 +464,7 @@ onBeforeUnmount(() => {
               <div class="article-content" v-html="renderedContent" />
               <CommentSection
                 v-if="article"
+                :key="article.id"
                 :article-id="article.id"
                 :article-author-id="article.authorId"
                 :comment-count="article.commentCount"
