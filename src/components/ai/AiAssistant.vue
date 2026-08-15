@@ -195,6 +195,7 @@ const workflowWaitingConfirm = computed(() => {
   return (
     status === 'WAITING_OUTLINE_CONFIRM' ||
     status === 'WAITING_PLAN_CONFIRM' ||
+    status === 'WAITING_LEARNING_PLAN_CONFIRM' ||
     status === 'WAITING_DRAFT_CONFIRM' ||
     status === 'WAITING_FILL_CONFIRM'
   )
@@ -211,6 +212,11 @@ const workflowFailed = computed(() => {
 const workflowQualityCheck = computed(() => {
   const ctx = activeWorkflow.value?.context
   return ctx?.stepResults?.contentCheck ?? ctx?.qualityCheck ?? null
+})
+
+//学习规划 Workflow 生成的结构化计划（确认面板渲染用）
+const workflowLearningPlan = computed(() => {
+  return activeWorkflow.value?.context?.stepResults?.plan ?? null
 })
 
 const workflowHasBlockingIssues = computed(() => {
@@ -231,6 +237,7 @@ function workflowStatusLabel(status?: WorkflowStatus) {
   if (status === 'WAITING_REQUIREMENT_CONFIRM') return '等待补充需求'
   if (status === 'WAITING_OUTLINE_CONFIRM') return '等待确认大纲'
   if (status === 'WAITING_PLAN_CONFIRM') return '等待确认优化方案'
+  if (status === 'WAITING_LEARNING_PLAN_CONFIRM') return '等待确认学习计划'
   if (status === 'WAITING_DRAFT_CONFIRM') return '等待确认草稿'
   if (status === 'WAITING_FILL_CONFIRM') return '等待填充编辑器'
   if (status === 'WAITING_USER_SAVE') return '已填充编辑器，等待保存/发布'
@@ -306,6 +313,16 @@ function formatWorkflowQualityCheck(check?: {
 }
 
 function buildWorkflowSnapshotContent(workflow: AiWorkflowRun) {
+  // 学习规划 Workflow：显示计划标题 + 阶段摘要
+  if (workflow.workflowType === 'LEARNING_PLAN') {
+    const plan = workflow.context?.stepResults?.plan
+    if (plan?.title) {
+      const stageCount = plan.stages?.length ?? 0
+      return `学习计划：${plan.title}${stageCount ? `（共 ${stageCount} 个阶段）` : ''}`
+    }
+    return '学习规划 Workflow'
+  }
+
   // 文章优化 Workflow：显示优化方案 / 优化稿
   if (workflow.workflowType === 'OPTIMIZE_ARTICLE') {
     const stepResults = workflow.context?.stepResults
@@ -385,7 +402,9 @@ function attachWorkflowToLatestAiMessage(workflow: AiWorkflowRun) {
     messages.value[existingIndex] = {
       ...messages.value[existingIndex],
       workflow,
-      content: buildWorkflowSnapshotContent(workflow),
+      // 历史消息落库时已有真实 content，只在为空时用快照兜底，不覆盖
+      content:
+        messages.value[existingIndex].content || buildWorkflowSnapshotContent(workflow),
     }
     return
   }
@@ -395,7 +414,7 @@ function attachWorkflowToLatestAiMessage(workflow: AiWorkflowRun) {
       messages.value[i] = {
         ...messages.value[i],
         workflow,
-        content: buildWorkflowSnapshotContent(workflow),
+        content: messages.value[i].content || buildWorkflowSnapshotContent(workflow),
       }
       return
     }
@@ -610,6 +629,13 @@ function applyWorkflowStepEvent(event: WorkflowStepEvent) {
 async function applyWorkflowStreamResult(data: WorkflowStreamResult) {
   if (!data.workflow) return
 
+  // 结束态（否定反馈取消 / 保存完成）：清空面板和本地 session 缓存，让后续消息走普通聊天
+  if (data.workflow.status === 'CANCELLED' || data.workflow.status === 'COMPLETED') {
+    activeWorkflow.value = null
+    clearSessionActiveWorkflow(data.workflow.id)
+    return
+  }
+
   activeWorkflow.value = data.workflow
   syncWorkflowSnapshotMessage(data.workflow)
   // 流式内容已落库到 snapshot，清理累积的 delta
@@ -642,11 +668,15 @@ async function refreshWorkflowStepLogs(workflowId: string) {
   workflowStepLogs.value[workflowId] = res.data ?? []
 }
 
-/** 展开/收起步骤日志，展开时懒加载 */
+/** 展开/收起步骤日志，展开时懒加载；展开状态持久化，刷新后恢复 */
 async function toggleWorkflowStepLogs(workflowId: string) {
   workflowStepLogsExpanded.value[workflowId] = !workflowStepLogsExpanded.value[workflowId]
 
-  if (!workflowStepLogsExpanded.value[workflowId]) return
+  if (!workflowStepLogsExpanded.value[workflowId]) {
+    localStorage.removeItem(`ai_wf_logs_expanded_${workflowId}`)
+    return
+  }
+  localStorage.setItem(`ai_wf_logs_expanded_${workflowId}`, '1')
   if (workflowStepLogs.value[workflowId]?.length) return
   if (workflowStepLogsLoading.value[workflowId]) return
 
@@ -903,6 +933,12 @@ async function hydrateWorkflowMessages() {
         content: messages.value[idx].content || buildWorkflowSnapshotContent(run),
       }
     }
+
+    // 恢复步骤日志展开状态（刷新前展开过的自动重新展开并拉取）
+    if (localStorage.getItem(`ai_wf_logs_expanded_${id}`) === '1') {
+      workflowStepLogsExpanded.value[id] = true
+      void refreshWorkflowStepLogs(id)
+    }
   })
 }
 
@@ -943,6 +979,13 @@ async function restoreActiveWorkflow(session?: AiSession | null) {
     const res = await aiApi.getWorkflowRun(workflowId)
     if (!res.data) {
       activeWorkflow.value = null
+      return
+    }
+
+    // 结束态的 workflow 不该恢复为 active（面板无对应操作区），只挂回消息卡片
+    if (res.data.status === 'COMPLETED' || res.data.status === 'CANCELLED') {
+      activeWorkflow.value = null
+      attachWorkflowToLatestAiMessage(res.data)
       return
     }
 
@@ -1802,13 +1845,17 @@ watch(visible, async (v) => {
                 <div v-if="msg.role === 'ai' && msg.workflow" class="ai-workflow-card">
                   <div class="ai-workflow-card__head">
                     <span class="ai-workflow-card__badge">
-                      {{ msg.workflow.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : '文章创作 Workflow' }}
+                      {{ msg.workflow.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : msg.workflow.workflowType === 'LEARNING_PLAN' ? '学习规划 Workflow' : '文章创作 Workflow' }}
                     </span>
-                    <span class="ai-workflow-card__status">
-                      <template v-if="msg.workflow.id === activeWorkflow?.id && isTransitioning">
-                        <n-spin size="14" /> {{ transitionLabel }}
-                      </template>
-                      <template v-else>{{ workflowStatusLabel(msg.workflow.status) }}</template>
+                    <span
+                      v-if="msg.workflow.id === activeWorkflow?.id && isTransitioning"
+                      class="ai-workflow-card__status ai-workflow-card__status--loading"
+                    >
+                      <n-spin :size="14" />
+                      <span>{{ transitionLabel }}</span>
+                    </span>
+                    <span v-else class="ai-workflow-card__status">
+                      {{ workflowStatusLabel(msg.workflow.status) }}
                     </span>
                   </div>
                   <div class="ai-workflow-card__body">
@@ -1816,8 +1863,31 @@ watch(visible, async (v) => {
                       <span class="ai-workflow-card__label">当前步骤</span>
                       <span>{{ workflowStepLabel(msg.workflow.currentStep) }}</span>
                     </div>
+                    <!-- ===== 学习规划 Workflow：结构化计划渲染（阶段/任务列表） ===== -->
+                    <template v-if="msg.workflow.workflowType === 'LEARNING_PLAN'">
+                      <div
+                        v-if="msg.workflow.context?.stepResults?.plan"
+                        class="ai-learning-plan"
+                      >
+                        <h4 class="ai-learning-plan-title">
+                          {{ msg.workflow.context.stepResults.plan.title || '学习计划' }}
+                        </h4>
+                        <div
+                          v-for="(stage, si) in msg.workflow.context.stepResults.plan.stages"
+                          :key="si"
+                          class="ai-learning-plan-stage"
+                        >
+                          <p class="ai-learning-plan-stage-title">阶段 {{ si + 1 }}：{{ stage.title }}</p>
+                          <ul class="ai-learning-plan-tasks">
+                            <li v-for="(task, ti) in stage.tasks" :key="ti">
+                              {{ typeof task === 'string' ? task : task.title }}
+                            </li>
+                          </ul>
+                        </div>
+                      </div>
+                    </template>
                     <!-- ===== 创作 Workflow ===== -->
-                    <template v-if="msg.workflow.workflowType !== 'OPTIMIZE_ARTICLE'">
+                    <template v-else-if="msg.workflow.workflowType !== 'OPTIMIZE_ARTICLE'">
                     <div v-if="msg.workflow.context?.requirement?.topic" class="ai-workflow-card__topic">
                       <span class="ai-workflow-card__label">主题</span>
                       <span>{{ msg.workflow.context.requirement.topic }}</span>
@@ -2067,7 +2137,7 @@ watch(visible, async (v) => {
           <div class="ai-workflow-panel">
             <div class="ai-workflow-head">
               <span class="ai-workflow-badge">
-                {{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : '文章创作 Workflow' }}
+                {{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : activeWorkflow?.workflowType === 'LEARNING_PLAN' ? '学习规划 Workflow' : '文章创作 Workflow' }}
               </span>
               <span class="ai-workflow-status">{{ workflowStatusLabel(activeWorkflow?.status) }}</span>
             </div>
@@ -2107,13 +2177,33 @@ watch(visible, async (v) => {
           <div class="ai-workflow-panel">
             <div class="ai-workflow-head">
               <span class="ai-workflow-badge">
-                {{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : '文章创作 Workflow' }}
+                {{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : activeWorkflow?.workflowType === 'LEARNING_PLAN' ? '学习规划 Workflow' : '文章创作 Workflow' }}
               </span>
               <span
                 v-if="workflowDraftNeedsFix"
                 class="ai-workflow-status ai-workflow-status--bad"
               >{{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '优化结果未通过检查，请提修改意见' : '草稿未通过检查，请提修改意见' }}</span>
               <span v-else class="ai-workflow-status">{{ workflowStatusLabel(activeWorkflow?.status) }}</span>
+            </div>
+
+            <!-- 学习规划 Workflow：结构化计划渲染（阶段/任务列表） -->
+            <div
+              v-if="activeWorkflow?.workflowType === 'LEARNING_PLAN' && workflowLearningPlan"
+              class="ai-learning-plan"
+            >
+              <h4 class="ai-learning-plan-title">{{ workflowLearningPlan.title || '学习计划' }}</h4>
+              <div
+                v-for="(stage, si) in workflowLearningPlan.stages"
+                :key="si"
+                class="ai-learning-plan-stage"
+              >
+                <p class="ai-learning-plan-stage-title">阶段 {{ si + 1 }}：{{ stage.title }}</p>
+                <ul class="ai-learning-plan-tasks">
+                  <li v-for="(task, ti) in stage.tasks" :key="ti">
+                    {{ typeof task === 'string' ? task : task.title }}
+                  </li>
+                </ul>
+              </div>
             </div>
 
             <div v-if="workflowDraftNeedsFix || workflowRejectEditing" class="ai-workflow-reject">
@@ -2191,7 +2281,7 @@ watch(visible, async (v) => {
           <div class="ai-workflow-panel">
             <div class="ai-workflow-head">
               <span class="ai-workflow-badge">
-                {{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : '文章创作 Workflow' }}
+                {{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : activeWorkflow?.workflowType === 'LEARNING_PLAN' ? '学习规划 Workflow' : '文章创作 Workflow' }}
               </span>
               <span class="ai-workflow-status">{{ workflowStatusLabel(activeWorkflow?.status) }}</span>
             </div>
@@ -2222,7 +2312,7 @@ watch(visible, async (v) => {
           <div class="ai-workflow-panel">
             <div class="ai-workflow-head">
               <span class="ai-workflow-badge">
-                {{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : '文章创作 Workflow' }}
+                {{ activeWorkflow?.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : activeWorkflow?.workflowType === 'LEARNING_PLAN' ? '学习规划 Workflow' : '文章创作 Workflow' }}
               </span>
               <span class="ai-workflow-status ai-workflow-status--bad">
                 {{ workflowStatusLabel(activeWorkflow?.status) }}
@@ -3588,6 +3678,40 @@ watch(visible, async (v) => {
   gap: 8px;
 }
 
+/* 学习规划 Workflow：结构化计划渲染 */
+.ai-learning-plan {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--ai-border, #e5e7eb);
+  border-radius: 8px;
+  background: var(--ai-bg-soft, #f8fafc);
+}
+
+.ai-learning-plan-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ai-learning-plan-stage-title {
+  margin: 8px 0 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ai-text, #374151);
+}
+
+.ai-learning-plan-tasks {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  color: var(--ai-text-secondary, #6b7280);
+}
+
+.ai-learning-plan-tasks li {
+  margin: 2px 0;
+}
+
 .ai-workflow-badge {
   font-size: 12px;
   font-weight: 700;
@@ -3670,11 +3794,19 @@ watch(visible, async (v) => {
   align-items: center;
   justify-content: center;
   gap: 10px;
+  min-height: 44px;
   padding: 12px 0;
+}
+
+.ai-workflow-panel--transition :deep(.n-spin-container) {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
 }
 
 .ai-workflow-transition-label {
   font-size: 14px;
+  line-height: 20px;
   color: #4b5563;
 }
 
@@ -3709,6 +3841,22 @@ watch(visible, async (v) => {
 .ai-workflow-card__status {
   font-size: 12px;
   color: #4b5563;
+}
+
+.ai-workflow-card__status--loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-height: 18px;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+
+.ai-workflow-card__status--loading :deep(.n-spin-container) {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
 }
 
 .ai-workflow-card__body {
