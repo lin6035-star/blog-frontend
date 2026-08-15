@@ -401,6 +401,9 @@ onMounted(() => {
             <span>加入于</span>
             <strong>{{ joinedAtText }}</strong>
           </div>
+          <router-link class="profile-learning-plans-entry" to="/me/learning-plans">
+            我的学习计划
+          </router-link>
         </aside>
       </div>
 
@@ -709,6 +712,20 @@ onMounted(() => {
   background: #fff;
   box-shadow: 0 2px 8px rgba(15, 23, 42, 0.03);
   overflow: hidden;
+}
+
+.profile-learning-plans-entry {
+  align-self: end;
+  display: block;
+  padding: 10px 14px;
+  border-top: 1px solid #eef0f2;
+  font-size: 13px;
+  color: #2563eb;
+  text-decoration: none;
+}
+
+.profile-learning-plans-entry:hover {
+  background: #f8fafc;
 }
 
 .profile-follow-row {

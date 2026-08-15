@@ -10,6 +10,8 @@ import EditorView from '@/views/EditorView.vue'
 import DraftsView from '@/views/DraftsView.vue'
 import HotRankView from '@/views/HotRankView.vue'
 import AuthCallbackView from '@/views/AuthCallbackView.vue'
+import LearningPlansView from '@/views/LearningPlansView.vue'
+import LearningPlanDetailView from '@/views/LearningPlanDetailView.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const { message } = createDiscreteApi(['message'])
@@ -59,6 +61,18 @@ const router = createRouter({
       name: 'public-profile',
       component: PublicProfileView,
       meta: { title: '用户主页' },
+    },
+    {
+      path: '/me/learning-plans',
+      name: 'learning-plans',
+      component: LearningPlansView,
+      meta: { title: '我的学习计划', requiresAuth: true },
+    },
+    {
+      path: '/me/learning-plans/:id',
+      name: 'learning-plan-detail',
+      component: LearningPlanDetailView,
+      meta: { title: '学习计划详情', requiresAuth: true },
     },
     {
       path: '/editor',

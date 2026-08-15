@@ -102,6 +102,7 @@ export type WorkflowStatus =
   | 'WAITING_OUTLINE_CONFIRM'
   | 'WAITING_DRAFT_CONFIRM'
   | 'WAITING_PLAN_CONFIRM'
+  | 'WAITING_LEARNING_PLAN_CONFIRM'
   | 'WAITING_FILL_CONFIRM'
   | 'WAITING_USER_SAVE'
   | 'PAUSED'
@@ -109,7 +110,7 @@ export type WorkflowStatus =
   | 'FAILED'
   | 'CANCELLED'
 
-export type WorkflowType = 'CREATE_ARTICLE' | 'OPTIMIZE_ARTICLE'
+export type WorkflowType = 'CREATE_ARTICLE' | 'OPTIMIZE_ARTICLE' | 'LEARNING_PLAN'
 
 export type WorkflowStep =
   | 'REQUIREMENT_ANALYZE'
@@ -124,6 +125,9 @@ export type WorkflowStep =
   | 'GENERATE_OPTIMIZATION_PLAN'
   | 'REWRITE_ARTICLE'
   | 'CONTENT_CHECK'
+  | 'ANALYZE_GOAL'
+  | 'GENERATE_PLAN'
+  | 'SAVE_PLAN'
 
 export interface WorkflowFeedbackItem {
   time: string
@@ -207,10 +211,30 @@ export interface AiWorkflowRun {
   workflowVersion: string
   status: WorkflowStatus
   currentStep?: WorkflowStep
-  context: CreateArticleWorkflowContext & OptimizeArticleWorkflowContext
+  context: CreateArticleWorkflowContext & OptimizeArticleWorkflowContext & LearningPlanWorkflowContext
   editorAction?: EditorAction
   pauseReason?: string
   errorMessage?: string
+}
+
+export interface LearningPlanWorkflowContext {
+  input?: {
+    goal?: string
+  }
+  stepResults?: {
+    plan?: {
+      title?: string
+      stages?: Array<{
+        title?: string
+        tasks?: Array<string | { title?: string }>
+      }>
+    }
+    qualityCheck?: {
+      passed?: boolean
+      issues?: string[]
+      suggestions?: string[]
+    }
+  }
 }
 
 export interface AiWorkflowStepLog {
