@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { ArrowBack, CheckmarkCircleOutline, EllipseOutline } from '@vicons/ionicons5'
 import MainLayout from '@/layouts/MainLayout.vue'
-import { learningPlanApi, type LearningPlanDetail } from '@/api/learningPlan'
+import { learningPlanApi, type LearningPlanDetail, type LearningStageProgress } from '@/api/learningPlan'
 
 const route = useRoute()
 const router = useRouter()
@@ -27,6 +27,24 @@ async function loadDetail() {
     message.error('学习计划加载失败')
   } finally {
     loading.value = false
+  }
+}
+
+//任务勾选：乐观更新，失败回滚（进度实时聚合，前端本地改 doneTasks）
+async function toggleTask(stage: LearningStageProgress, taskIndex: number) {
+  if (!detail.value) return
+  const task = stage.tasks[taskIndex]
+  if (!task) return
+
+  const next = !task.done
+  task.done = next
+  detail.value.doneTasks += next ? 1 : -1
+  try {
+    await learningPlanApi.updateTaskDone(detail.value.plan.id, stage.id, taskIndex, next)
+  } catch {
+    task.done = !next
+    detail.value.doneTasks += next ? -1 : 1
+    message.error('任务状态更新失败')
   }
 }
 
@@ -83,11 +101,18 @@ onMounted(loadDetail)
               class="learning-plan-task"
               :class="{ 'learning-plan-task--done': task.done }"
             >
-              <n-icon
-                :component="task.done ? CheckmarkCircleOutline : EllipseOutline"
-                :class="task.done ? 'task-icon-done' : 'task-icon-todo'"
-                size="16"
-              />
+              <button
+                class="learning-plan-task-toggle"
+                type="button"
+                :title="task.done ? '标记为未完成' : '标记为已完成'"
+                @click="toggleTask(stage, ti)"
+              >
+                <n-icon
+                  :component="task.done ? CheckmarkCircleOutline : EllipseOutline"
+                  :class="task.done ? 'task-icon-done' : 'task-icon-todo'"
+                  size="16"
+                />
+              </button>
               <span>{{ task.title }}</span>
             </li>
           </ul>
@@ -204,6 +229,15 @@ onMounted(loadDetail)
   gap: 8px;
   font-size: 13.5px;
   color: #4b5563;
+}
+
+.learning-plan-task-toggle {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
 }
 
 .learning-plan-task--done span {

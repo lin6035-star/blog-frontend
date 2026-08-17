@@ -111,7 +111,7 @@ export type WorkflowStatus =
   | 'FAILED'
   | 'CANCELLED'
 
-export type WorkflowType = 'CREATE_ARTICLE' | 'OPTIMIZE_ARTICLE' | 'LEARNING_PLAN'
+export type WorkflowType = 'CREATE_ARTICLE' | 'OPTIMIZE_ARTICLE' | 'LEARNING_PLAN' | 'LEARNING_PROGRESS' | 'LEARNING_ASSIST'
 
 export type WorkflowStep =
   | 'REQUIREMENT_ANALYZE'
@@ -129,12 +129,27 @@ export type WorkflowStep =
   | 'ANALYZE_GOAL'
   | 'GENERATE_PLAN'
   | 'SAVE_PLAN'
+  | 'LOAD_PLAN'
+  | 'ANALYZE_CHANGE'
+  | 'LOCATE_STAGE'
+  | 'GENERATE_TASKS'
+  | 'APPEND_TASKS'
 
 export interface WorkflowFeedbackItem {
   time: string
   step: WorkflowStep
   status: WorkflowStatus
   userFeedback: string
+}
+
+/**
+ * 确认卡片：Workflow 停在等待确认态时由后端写入。
+ * type 决定渲染哪种确认面板（与 status 解耦，前端只按 type 渲染）。
+ */
+export interface WorkflowConfirmation {
+  type: 'REQUIREMENT' | 'OUTLINE' | 'DRAFT' | 'PLAN' | 'LEARNING_PLAN' | 'FILL'
+  step?: WorkflowStep
+  question?: string
 }
 
 export interface CreateArticleWorkflowContext {
@@ -148,12 +163,10 @@ export interface CreateArticleWorkflowContext {
     type?: string
     keywords?: string[]
   }
-  clarification?: {
-    required?: boolean
-    question?: string
-  }
+  confirmation?: WorkflowConfirmation
   memoryContext?: string
   ragReferences?: ArticleRagReference[]
+  // 以下三个字段为历史数据位置（早期版本放 context 顶层），新数据统一在 stepResults
   outline?: string
   draft?: {
     title?: string
@@ -166,11 +179,26 @@ export interface CreateArticleWorkflowContext {
     issues?: string[]
     suggestions?: string[]
   }
+  stepResults?: {
+    outline?: string
+    draft?: {
+      title?: string
+      summary?: string
+      content?: string
+      tags?: string[]
+    }
+    qualityCheck?: {
+      passed?: boolean
+      issues?: string[]
+      suggestions?: string[]
+    }
+  }
   feedbackHistory?: WorkflowFeedbackItem[]
 }
 
 export interface OptimizeArticleWorkflowContext {
   workflowVersion: string
+  confirmation?: WorkflowConfirmation
   input?: {
     articleId?: number
     instruction?: string
@@ -219,12 +247,16 @@ export interface AiWorkflowRun {
 }
 
 export interface LearningPlanWorkflowContext {
+  confirmation?: WorkflowConfirmation
+  planTitle?: string  //难点攻坚：目标计划标题
+  targetStageTitle?: string  //难点攻坚：定位到的阶段标题
   input?: {
     goal?: string
   }
   stepResults?: {
     plan?: {
       title?: string
+      explanation?: string  //难点攻坚：难点讲解文本
       stages?: Array<{
         title?: string
         tasks?: Array<string | { title?: string }>
@@ -731,11 +763,6 @@ export const aiApi = {
   /** 重试失败的 Workflow 当前步骤（SSE） */
   streamRetryWorkflow(id: string, callbacks: WorkflowStreamCallbacks, signal?: AbortSignal) {
     return streamWorkflowAction(`/api/ai/workflows/${id}/retry/stream`, undefined, callbacks, signal)
-  },
-
-  /** 完成 Workflow（编辑器已保存/发布后收口） */
-  completeWorkflow(id: string) {
-    return request.post<AiWorkflowRun>(`/ai/workflows/${id}/complete`)
   },
 
   /** 取消 Workflow */
