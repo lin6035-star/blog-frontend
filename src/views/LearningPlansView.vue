@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { useMessage } from 'naive-ui'
-import { ArrowBack, BulbOutline } from '@vicons/ionicons5'
+import { useDialog, useMessage } from 'naive-ui'
+import { ArrowBack, BulbOutline, TrashOutline } from '@vicons/ionicons5'
 import MainLayout from '@/layouts/MainLayout.vue'
 import { learningPlanApi, type LearningPlan } from '@/api/learningPlan'
+
 
 const router = useRouter()
 const message = useMessage()
@@ -16,6 +17,26 @@ const statusLabel: Record<string, string> = {
   ACTIVE: '进行中',
   COMPLETED: '已完成',
   ARCHIVED: '已归档',
+}
+
+const dialog = useDialog()
+
+function confirmDelete(plan: LearningPlan) {
+  dialog.warning({
+    title: '确认删除学习计划',
+    content: `确定永久删除《${plan.title}》吗？计划中的全部阶段和任务都会被删除，无法恢复。`,
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        await learningPlanApi.delete(plan.id)
+        plans.value = plans.value.filter((item) => item.id !== plan.id)
+        message.success('学习计划已删除')
+      } catch {
+        message.error('学习计划删除失败')
+      }
+    },
+  })
 }
 
 async function loadPlans() {
@@ -80,9 +101,20 @@ onMounted(loadPlans)
         >
           <div class="learning-plan-card-head">
             <h2>{{ plan.title }}</h2>
-            <span class="learning-plan-status" :class="`learning-plan-status--${plan.status.toLowerCase()}`">
-              {{ statusLabel[plan.status] ?? plan.status }}
-            </span>
+            <div class="learning-plan-card-actions">
+              <span class="learning-plan-status" :class="`learning-plan-status--${plan.status.toLowerCase()}`">
+                {{ statusLabel[plan.status] ?? plan.status }}
+              </span>
+              <button
+                class="learning-plan-delete"
+                type="button"
+                title="删除学习计划"
+                @click.stop="confirmDelete(plan)"
+                @keydown.enter.stop
+              >
+                <n-icon :component="TrashOutline" size="16" />
+              </button>
+            </div>
           </div>
           <p v-if="plan.goal" class="learning-plan-goal">{{ plan.goal }}</p>
           <p class="learning-plan-date">创建于 {{ new Date(plan.createdAt).toLocaleDateString('zh-CN') }}</p>
@@ -209,5 +241,25 @@ onMounted(loadPlans)
   margin: 0;
   font-size: 12px;
   color: #9ca3af;
+}
+
+.learning-plan-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.learning-plan-delete {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  color: #9ca3af;
+  cursor: pointer;
+  padding: 2px;
+}
+
+.learning-plan-delete:hover {
+  color: #dc2626;
 }
 </style>

@@ -41,4 +41,14 @@ export const learningPlanApi = {
   detail(id: string) {
     return request.get<LearningPlanDetail>(`/learning-plans/${id}`)
   },
+
+  /** 任务勾选（taskIndex 为任务在阶段 tasks 列表中的下标，从 0 开始） */
+  updateTaskDone(planId: string, stageId: string, taskIndex: number, done: boolean) {
+    return request.patch<void>(`/learning-plans/${planId}/stages/${stageId}/tasks/${taskIndex}`, { done })
+  },
+
+  /* 删除学习规划 */
+  delete(id: string) {
+  return request.delete<void>(`/learning-plans/${id}`)
+},
 }
