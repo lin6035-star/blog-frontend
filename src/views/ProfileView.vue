@@ -13,6 +13,7 @@ import {
   RefreshOutline,
   TrashOutline,
 } from '@vicons/ionicons5'
+import { aiApi, type AiEpisodicMemory } from '@/api/ai'
 import { myArticleApi } from '@/api/myArticle'
 import { publicUserApi } from '@/api/publicUser'
 import { ARTICLE_STATUS, getArticleStatusLabel } from '@/constants/articleStatus'
@@ -45,7 +46,7 @@ const profileForm = reactive({
   bio: '',
 })
 
-type ProfileTabKey = 'published' | 'liked' | 'favorited' | 'commented' | 'following' | 'followers'
+type ProfileTabKey = 'published' | 'liked' | 'favorited' | 'commented' | 'following' | 'followers' | 'episodic'
 
 const activeTab = ref<ProfileTabKey>('published')
 const profileTabs = [
@@ -55,6 +56,7 @@ const profileTabs = [
   { key: 'commented', label: '我评论的' },
   { key: 'following', label: '我关注的' },
   { key: 'followers', label: '关注我的' },
+  { key: 'episodic', label: '情景记忆' },
 ] satisfies Array<{ key: ProfileTabKey; label: string }>
 
 const profileTabText: Record<ProfileTabKey, { empty: string; status: string }> = {
@@ -64,6 +66,7 @@ const profileTabText: Record<ProfileTabKey, { empty: string; status: string }> =
   commented: { empty: '还没有评论过文章', status: '评论过' },
   following: { empty: '还没有关注其他用户', status: '' },
   followers: { empty: '还没有关注者', status: '' },
+  episodic: { empty: '还没有情景记忆', status: '' },
 }
 
 function goBack() {
@@ -94,6 +97,17 @@ const total = ref(0)
 const relationUsers = ref<UserRelation[]>([])
 const relationActionKeys = ref(new Set<string>())
 const isRelationTab = computed(() => activeTab.value === 'following' || activeTab.value === 'followers')
+const episodicMemories = ref<AiEpisodicMemory[]>([])
+const episodicLoading = ref(false)
+const episodicCurrentPage = ref(1)
+const episodicPageSize = 5
+const episodicTotal = ref(0)
+const episodicActionKeys = ref(new Set<string>())
+const isEpisodicTab = computed(() => activeTab.value === 'episodic')
+const episodicVisibleMemories = computed(() => {
+  const start = (episodicCurrentPage.value - 1) * episodicPageSize
+  return episodicMemories.value.slice(start, start + episodicPageSize)
+})
 
 function getArticleTabRequest(key: ProfileTabKey, page: number) {
   if (key === 'liked') {
@@ -145,6 +159,16 @@ async function loadArticlesForTab(key: ProfileTabKey = activeTab.value, page = c
 
 function goToArticle(article: Article) {
   router.push(`/articles/${article.id}`)
+}
+
+function episodicMemoryTypeLabel(type: AiEpisodicMemory['memoryType']) {
+  const labels: Record<AiEpisodicMemory['memoryType'], string> = {
+    DECISION: '决策',
+    EVENT: '事件',
+    MILESTONE: '里程碑',
+    PLAN: '计划',
+  }
+  return labels[type] ?? type
 }
 
 /* ---- 关注列表操作 ---- */
@@ -245,11 +269,67 @@ function handleDelete(article: Article) {
   })
 }
 
+function finishEpisodicAction(key: string) {
+  const nextKeys = new Set(episodicActionKeys.value)
+  nextKeys.delete(key)
+  episodicActionKeys.value = nextKeys
+}
+
+async function loadEpisodicMemories(page = episodicCurrentPage.value) {
+  episodicLoading.value = true
+  try {
+    const res = await aiApi.getEpisodicMemories()
+    const data = res.data ?? []
+    episodicMemories.value = data
+    episodicTotal.value = data.length
+    episodicCurrentPage.value = page
+  } catch {
+    message.error('加载情景记忆失败')
+  } finally {
+    episodicLoading.value = false
+  }
+}
+
+function handleDeleteEpisodicMemory(memory: AiEpisodicMemory) {
+  const actionKey = `episodic-delete-${memory.id}`
+  dialog.error({
+    title: '确认删除',
+    content: `确定要删除情景记忆《${memory.title}》吗？删除后无法恢复。`,
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      if (episodicActionKeys.value.has(actionKey)) return
+      episodicActionKeys.value = new Set([...episodicActionKeys.value, actionKey])
+      try {
+        await aiApi.deleteEpisodicMemory(memory.id)
+        episodicMemories.value = episodicMemories.value.filter((item) => item.id !== memory.id)
+        episodicTotal.value = Math.max(0, episodicTotal.value - 1)
+        const maxPage = Math.max(1, Math.ceil(episodicTotal.value / episodicPageSize))
+        if (episodicCurrentPage.value > maxPage) {
+          episodicCurrentPage.value = maxPage
+        }
+        message.success('已删除')
+      } catch {
+        message.error('删除失败')
+      } finally {
+        finishEpisodicAction(actionKey)
+      }
+    },
+    onNegativeClick: () => {
+      finishEpisodicAction(actionKey)
+    },
+  })
+}
+
 function onPageChange(page: number) {
+  if (activeTab.value === 'episodic') {
+    episodicCurrentPage.value = page
+    return
+  }
   loadArticlesForTab(activeTab.value, page)
 }
 
-function switchTab(key: ProfileTabKey) {
+async function switchTab(key: ProfileTabKey) {
   if (activeTab.value === key) {
     return
   }
@@ -257,7 +337,15 @@ function switchTab(key: ProfileTabKey) {
   activeTab.value = key
   articles.value = []
   relationUsers.value = []
+  episodicMemories.value = []
   total.value = 0
+  episodicTotal.value = 0
+
+  if (key === 'episodic') {
+    await loadEpisodicMemories(1)
+    return
+  }
+
   loadArticlesForTab(key, 1)
 }
 
@@ -424,7 +512,7 @@ onMounted(() => {
         </header>
 
         <!-- 加载骨架 -->
-        <div v-if="articleLoading" class="profile-articles">
+        <div v-if="!isEpisodicTab && articleLoading" class="profile-articles">
           <div v-for="i in pageSize" :key="i" class="profile-article-card">
             <n-skeleton text style="width: 48%; height: 20px; margin-bottom: 8px" />
             <n-skeleton text style="margin-bottom: 8px" />
@@ -438,7 +526,7 @@ onMounted(() => {
         </div>
 
         <!-- 空态：文章列表 -->
-        <div v-else-if="!isRelationTab && !articles.length" class="profile-empty">
+        <div v-else-if="!isEpisodicTab && !isRelationTab && !articles.length" class="profile-empty">
           <p class="profile-tab-empty-title">{{ profileTabText[activeTab].empty }}</p>
           <router-link
             v-if="activeTab === 'published'"
@@ -480,6 +568,61 @@ onMounted(() => {
             >
               {{ relUser.followed ? '已关注' : '关注' }}
             </n-button>
+          </div>
+        </div>
+
+        <!-- 情景记忆列表 -->
+        <div v-else-if="isEpisodicTab" class="profile-memory-wrap">
+          <div v-if="episodicLoading" class="profile-memory-list">
+            <div v-for="i in episodicPageSize" :key="i" class="profile-memory-card profile-memory-card--skeleton">
+              <n-skeleton text style="width: 44%; height: 18px; margin-bottom: 10px" />
+              <n-skeleton text style="margin-bottom: 8px" />
+              <n-skeleton text style="width: 84%; margin-bottom: 8px" />
+              <n-skeleton text style="width: 64%" />
+            </div>
+          </div>
+
+          <div v-else-if="!episodicMemories.length" class="profile-empty">
+            <p class="profile-tab-empty-title">{{ profileTabText.episodic.empty }}</p>
+            <p>这里会展示你和 AI 讨论过的决定、事件、里程碑和计划。</p>
+          </div>
+
+          <div v-else class="profile-memory-list">
+            <article
+              v-for="memory in episodicVisibleMemories"
+              :key="memory.id"
+              class="profile-memory-card"
+            >
+              <div class="profile-memory-card-head">
+                <div class="profile-memory-meta">
+                  <span class="profile-memory-type">
+                    {{ episodicMemoryTypeLabel(memory.memoryType) }}
+                  </span>
+                  <span class="profile-memory-date">
+                    {{ memory.occurredAt ? formatArticleDateTime(memory.occurredAt) : formatArticleDateTime(memory.createdAt) }}
+                  </span>
+                </div>
+
+                <button
+                  class="pa-btn delete"
+                  type="button"
+                  :disabled="episodicActionKeys.has(`episodic-delete-${memory.id}`)"
+                  @click="handleDeleteEpisodicMemory(memory)"
+                >
+                  <n-icon size="16"><TrashOutline /></n-icon>
+                  <span>删除</span>
+                </button>
+              </div>
+
+              <h3>{{ memory.title }}</h3>
+              <p class="profile-memory-content">{{ memory.content }}</p>
+
+              <div class="profile-memory-footer">
+                <span>重要性 {{ memory.importance ?? 6 }}</span>
+                <span>置信度 {{ Math.round((memory.confidence ?? 0) * 100) / 100 }}</span>
+                <span>{{ memory.projectKey }}</span>
+              </div>
+            </article>
           </div>
         </div>
 
@@ -542,11 +685,19 @@ onMounted(() => {
         </div>
 
         <!-- 分页 -->
-        <div v-if="total > pageSize" class="profile-pagination">
+        <div v-if="activeTab !== 'episodic' && total > pageSize" class="profile-pagination">
           <n-pagination
             :page="currentPage"
             :page-size="pageSize"
             :item-count="total"
+            @update:page="onPageChange"
+          />
+        </div>
+        <div v-else-if="activeTab === 'episodic' && episodicTotal > episodicPageSize" class="profile-pagination">
+          <n-pagination
+            :page="episodicCurrentPage"
+            :page-size="episodicPageSize"
+            :item-count="episodicTotal"
             @update:page="onPageChange"
           />
         </div>
@@ -856,6 +1007,86 @@ onMounted(() => {
 }
 .profile-go-write:hover {
   background: #25595d;
+}
+
+/* ---- 情景记忆 ---- */
+.profile-memory-wrap {
+  min-height: 280px;
+}
+
+.profile-memory-list {
+  display: grid;
+  gap: 14px;
+  padding: 18px 20px 0;
+}
+
+.profile-memory-card {
+  display: grid;
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 1px 6px rgba(15, 23, 42, 0.03);
+}
+
+.profile-memory-card--skeleton {
+  min-height: 124px;
+}
+
+.profile-memory-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.profile-memory-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.profile-memory-type {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: #eef6ff;
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.profile-memory-date {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.profile-memory-card h3 {
+  margin: 0;
+  color: #111827;
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.profile-memory-content {
+  margin: 0;
+  color: #4b5563;
+  font-size: 14px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.profile-memory-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  color: #6b7280;
+  font-size: 12px;
 }
 
 /* ---- 文章卡片 ---- */
