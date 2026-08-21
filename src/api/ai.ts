@@ -41,6 +41,26 @@ export interface AiMemory {
   updatedAt: string
 }
 
+export interface AiEpisodicMemory {
+  id: string
+  projectKey: string
+  memoryType: 'DECISION' | 'EVENT' | 'MILESTONE' | 'PLAN'
+  title: string
+  content: string
+  importance?: number
+  confidence?: number
+  sessionId?: string
+  occurredAt?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AiConversationSummaryStatus {
+  compressing: boolean
+  lastCompressedAt: string | null
+  coveredMessageCount: number
+}
+
 export interface AiSession {
   id: string
   title: string
@@ -682,6 +702,11 @@ export const aiApi = {
     return request.delete(`/ai/conversations/${sessionId}/messages/${messageId}`)
   },
 
+  /** 会话压缩状态：压缩中标记 / 最近压缩时间 / 已压缩消息数 */
+  getSummaryStatus(sessionId: string) {
+    return request.get<AiConversationSummaryStatus>(`/ai/conversations/${sessionId}/summary-status`)
+  },
+
   /** 查询待确认记忆 */
   getMemoryCandidates() {
     return request.get<AiMemoryCandidate[]>('/ai/memory-candidates')
@@ -705,6 +730,16 @@ export const aiApi = {
   /** 删除正式长期记忆：后端实际是 enabled = 0 */
   deleteMemory(id: string) {
     return request.delete<void>(`/ai/memories/${id}`)
+  },
+
+  /** 查询情景记忆 */
+  getEpisodicMemories() {
+    return request.get<AiEpisodicMemory[]>('/ai/episodic-memories')
+  },
+
+  /** 物理删除情景记忆 */
+  deleteEpisodicMemory(id: string) {
+    return request.delete<void>(`/ai/episodic-memories/${id}`)
   },
 
   /** 编辑长期记忆内容 */

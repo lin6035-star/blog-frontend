@@ -22,6 +22,7 @@ import { aiApi } from '@/api/ai'
 import type {
   AiMessage,
   AiSession,
+  AiConversationSummaryStatus,
   PageContext,
   EditorAction,
   ArticleAction,
@@ -140,6 +141,103 @@ const AUTO_SCROLL_THRESHOLD = 48
 const sessions = ref<AiSession[]>([])
 const currentSessionId = ref<string | null>(null)
 const messages = ref<AiMessage[]>([])
+
+// ============================================================
+// 会话压缩提示：compressing=正在压缩 done=已完成（两行提示）
+// ============================================================
+
+type CompressionPhase = 'idle' | 'compressing' | 'done'
+const compressionPhase = ref<CompressionPhase>('idle')
+const compressionCoveredMessageCount = ref(0)
+// 上次已知的压缩完成时间：轮询发现 lastCompressedAt 变化即判断"本次压缩已完成"
+let compressionBaseline: string | null = null
+
+function resetCompressionHint() {
+  compressionPhase.value = 'idle'
+  compressionCoveredMessageCount.value = 0
+  compressionBaseline = null
+}
+
+function showCompressionDone(lastCompressedAt: string, coveredMessageCount?: number) {
+  compressionBaseline = lastCompressedAt
+  if (typeof coveredMessageCount === 'number') {
+    compressionCoveredMessageCount.value = coveredMessageCount
+  }
+  compressionPhase.value = 'done'
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// 压缩轮询序号：连续回复时旧轮询让位，避免旧状态覆盖新状态
+let compressionCheckSeq = 0
+
+// 回复结束后轮询压缩状态：
+// 后端压缩是异步的（LLM 调用 + 线程池排队，可能延迟数秒才启动），
+// 所以只要"上次压缩时间没变"就持续轮询（最多约 40s）：
+// compressing=true 显示"正在自动压缩上下文"，lastCompressedAt 变化显示"已自动压缩上下文"
+async function checkCompressionAfterReply(sessionId: string) {
+  if (isGuest.value || !sessionId) return
+  const seq = ++compressionCheckSeq
+  const baseline = compressionBaseline
+
+  // 延迟启动给异步压缩线程留启动窗口
+  await sleep(800)
+
+  for (let i = 0; i < 20; i++) {
+    if (seq !== compressionCheckSeq) return // 已发起新的检查，让位
+
+    let status: AiConversationSummaryStatus | null = null
+    try {
+      status = (await aiApi.getSummaryStatus(sessionId)).data
+    } catch {
+      console.warn('查询会话压缩状态失败', sessionId)
+      return
+    }
+    if (!status) return
+
+    if (status.lastCompressedAt && status.lastCompressedAt !== baseline) {
+      // 压缩已完成（无论是否抓到"压缩中"阶段）
+      showCompressionDone(status.lastCompressedAt, status.coveredMessageCount)
+      return
+    }
+    if (status.compressing) {
+      compressionCoveredMessageCount.value = status.coveredMessageCount
+      compressionPhase.value = 'compressing'
+    }
+    await sleep(2000)
+  }
+  // 超时后保持最后一次可见状态，不自动消失
+}
+
+async function syncCompressionHint(sessionId: string) {
+  if (isGuest.value || !sessionId) return
+
+  try {
+    const status = (await aiApi.getSummaryStatus(sessionId)).data
+    if (!status) {
+      resetCompressionHint()
+      return
+    }
+
+    if (status.compressing) {
+      compressionBaseline = status.lastCompressedAt
+      compressionCoveredMessageCount.value = status.coveredMessageCount
+      compressionPhase.value = 'compressing'
+      return
+    }
+
+    if (status.lastCompressedAt) {
+      showCompressionDone(status.lastCompressedAt, status.coveredMessageCount)
+      return
+    }
+
+    resetCompressionHint()
+  } catch {
+    // 查询失败时保留当前状态，不强行清空
+  }
+}
 
 // 用于取消正在进行的流式请求
 let abortController: AbortController | null = null
@@ -1067,7 +1165,9 @@ function closeHistory() {
 async function switchSession(sid: string) {
   currentSessionId.value = sid
   viewingHistory.value = false
+  resetCompressionHint()
   await loadMessages(sid)
+  await syncCompressionHint(sid)
 
   const session = sessions.value.find((item) => item.id === sid)
   await restoreActiveWorkflow(session)
@@ -1099,6 +1199,7 @@ async function deleteSession(sid: string) {
     if (currentSessionId.value === sid) {
       currentSessionId.value = null
       messages.value = []
+      resetCompressionHint()
     }
   } catch {
     message.error('删除失败')
@@ -1370,6 +1471,8 @@ async function send(text?: string, skipUserMessage = false) {
         }
 
         scheduleMemoryCandidateRefresh()
+        // 回复结束后检查后端异步压缩状态，显示"正在自动压缩上下文 / 已自动压缩上下文"
+        checkCompressionAfterReply(session.id)
       },
       onError(error) {
         abortController = null
@@ -1828,22 +1931,21 @@ watch(visible, async (v) => {
 
           <!-- 消息列表 -->
           <div v-else class="ai-messages">
-            <div
-              v-for="(msg, i) in messages"
-              :key="i"
-              class="ai-msg"
-              :class="msg.role"
-            >
-              <span class="ai-msg-avatar">
-                <template v-if="msg.role === 'ai'">🤖</template>
-                <img
-                  v-else-if="userAvatar"
-                  :src="userAvatar"
-                  class="ai-user-avatar-img"
-                />
-                <template v-else>👤</template>
-              </span>
-              <div class="ai-msg-bubble-wrapper">
+            <template v-for="(msg, i) in messages" :key="msg.id || i">
+              <div
+                class="ai-msg"
+                :class="msg.role"
+              >
+                <span class="ai-msg-avatar">
+                  <template v-if="msg.role === 'ai'">🤖</template>
+                  <img
+                    v-else-if="userAvatar"
+                    :src="userAvatar"
+                    class="ai-user-avatar-img"
+                  />
+                  <template v-else>👤</template>
+                </span>
+                <div class="ai-msg-bubble-wrapper">
                 <div v-if="msg.role === 'ai'" class="ai-msg-bubble markdown-body">
                   <span v-html="renderMarkdown(msg.content)" />
                   <span v-if="isMessageStreaming(i, msg.role)" class="ai-typing-dots"><i class="dot" /><i class="dot" /><i class="dot" /></span>
@@ -2149,7 +2251,24 @@ watch(visible, async (v) => {
                   <span class="ai-msg-time">{{ formatMessageTime(msg.createdAt) }}</span>
                 </div>
               </div>
-            </div>
+              </div>
+
+              <!-- 会话压缩状态：固定插在已压缩消息之后，后续新消息显示在提示下面 -->
+              <div
+                v-if="compressionPhase !== 'idle' && i + 1 === compressionCoveredMessageCount"
+                class="ai-compression-note"
+              >
+                <div
+                  v-if="compressionPhase === 'compressing' || compressionPhase === 'done'"
+                  class="ai-compression-note-line is-muted"
+                >
+                  正在自动压缩上下文
+                </div>
+                <div v-if="compressionPhase === 'done'" class="ai-compression-note-line">
+                  已完成上下文压缩
+                </div>
+              </div>
+            </template>
           </div>
         </div>
 
@@ -2742,6 +2861,7 @@ watch(visible, async (v) => {
    ============================================================ */
 
 .ai-body {
+  position: relative;
   flex: 1;
   overflow-y: auto;
   display: flex;
@@ -2908,6 +3028,26 @@ watch(visible, async (v) => {
   background: #f3f4f6;
   color: #1f2937;
   border-bottom-left-radius: 4px;
+}
+
+.ai-compression-note {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 0 0;
+  margin-top: 2px;
+  pointer-events: none;
+}
+
+.ai-compression-note-line {
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(120, 130, 145, 0.72);
+}
+
+.ai-compression-note-line.is-muted {
+  color: rgba(120, 130, 145, 0.5);
 }
 
 /* ---- RAG 引用列表 ---- */
