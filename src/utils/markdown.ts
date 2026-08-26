@@ -1,9 +1,11 @@
 import { marked, Renderer } from 'marked'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
+import { sanitizeHtml } from './sanitizeHtml'
 
 // ============================================================
 // marked + highlight.js 封装，用于 AI 消息的 Markdown 渲染
+// 流程固定：Markdown → marked.parse → DOMPurify.sanitize → v-html
 // ============================================================
 
 marked.setOptions({
@@ -21,5 +23,5 @@ renderer.code = function (token: { text: string; lang?: string; raw: string }) {
 
 export function renderMarkdown(content: string): string {
   if (!content) return ''
-  return marked.parse(content, { renderer }) as string
+  return sanitizeHtml(marked.parse(content, { renderer }) as string)
 }

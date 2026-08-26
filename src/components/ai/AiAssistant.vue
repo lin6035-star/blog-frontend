@@ -256,6 +256,95 @@ const workflowStepLogs = ref<Record<string, AiWorkflowStepLog[]>>({})
 const workflowStepLogsExpanded = ref<Record<string, boolean>>({})
 const workflowStepLogsLoading = ref<Record<string, boolean>>({})
 
+// Workflow 操作幂等 Key：同一 workflow 同一步操作复用同一 Key，
+// 网络失败重试不重复执行（后端按 Key 返回上次结果）；成功/业务失败后清除
+const WORKFLOW_ACTION_KEY_PREFIX = 'ai_workflow_action_key:'
+
+type PendingWorkflowAction = {
+  workflowId: string
+  action: 'APPROVE' | 'REJECT' | 'RETRY'
+  payload: string
+  key: string
+}
+
+function createWorkflowIdempotencyKey(): string {
+  if (
+    typeof crypto !== 'undefined'
+    && typeof crypto.randomUUID === 'function'
+  ) {
+    return crypto.randomUUID()
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function workflowActionStorageKey(
+  workflowId: string,
+  action: string,
+): string {
+  return `${WORKFLOW_ACTION_KEY_PREFIX}${workflowId}:${action}`
+}
+
+function getWorkflowActionKey(
+  workflowId: string,
+  action: PendingWorkflowAction['action'],
+  payload = '',
+): string {
+  const storageKey =
+    workflowActionStorageKey(workflowId, action)
+
+  try {
+    const raw = sessionStorage.getItem(storageKey)
+
+    if (raw) {
+      const pending =
+        JSON.parse(raw) as PendingWorkflowAction
+
+      if (
+        pending.workflowId === workflowId
+        && pending.action === action
+        && pending.payload === payload
+        && pending.key
+      ) {
+        return pending.key
+      }
+    }
+  } catch {
+    // sessionStorage 或 JSON 异常时重新生成
+  }
+
+  const pending: PendingWorkflowAction = {
+    workflowId,
+    action,
+    payload,
+    key: createWorkflowIdempotencyKey(),
+  }
+
+  try {
+    sessionStorage.setItem(
+      storageKey,
+      JSON.stringify(pending),
+    )
+  } catch {
+    // 存储失败时仍使用当前内存 Key
+  }
+
+  return pending.key
+}
+
+function clearWorkflowActionKey(
+  workflowId: string,
+  action: PendingWorkflowAction['action'],
+): void {
+  try {
+    sessionStorage.removeItem(
+      workflowActionStorageKey(workflowId, action),
+    )
+  } catch {
+    // ignore storage errors
+  }
+}
+
 // Workflow 流式正文：生成草稿时按 workflowId 累积 delta
 const workflowStreamingContent = ref<Record<string, string>>({})
 // Workflow 流式大纲：重写大纲时按 workflowId 累积 delta
@@ -574,28 +663,55 @@ function resetWorkflowRejectUI() {
 async function approveWorkflow() {
   if (!activeWorkflow.value || workflowBusy.value) return
 
+  const workflowId = activeWorkflow.value.id
+  const idempotencyKey =
+    getWorkflowActionKey(workflowId, 'APPROVE')
+
   workflowBusy.value = true
   localTransition.value = 'APPROVING'
-  try {
-    const workflowId = activeWorkflow.value.id
 
-    await aiApi.streamApproveWorkflow(workflowId, {
-      onStep: applyWorkflowStepEvent,
-      onContentDelta: applyWorkflowContentDelta,
-      async onStop(data) {
-        await applyWorkflowStreamResult(data)
-        resetWorkflowRejectUI()
+  try {
+    await aiApi.streamApproveWorkflow(
+      workflowId,
+      idempotencyKey,
+      {
+        onStep: applyWorkflowStepEvent,
+
+        onContentDelta: applyWorkflowContentDelta,
+
+        async onStop(data) {
+          await applyWorkflowStreamResult(data)
+          clearWorkflowActionKey(workflowId, 'APPROVE')
+          resetWorkflowRejectUI()
+        },
+
+        async onWorkflowError(data) {
+          await applyWorkflowStreamResult(data)
+
+          // 后端已经执行完成，只是业务结果为 FAILED
+          if (data.workflow) {
+            clearWorkflowActionKey(workflowId, 'APPROVE')
+          }
+
+          message.error(
+            data.message
+              ?? data.workflow?.errorMessage
+              ?? 'Workflow 执行失败',
+          )
+        },
+
+        onError(error) {
+          // 网络断开时保留 Key，下一次点击复用
+          message.error(
+            error?.message ?? 'Workflow 同意失败',
+          )
+        },
       },
-      async onWorkflowError(data) {
-        await applyWorkflowStreamResult(data)
-        message.error(data.message ?? data.workflow?.errorMessage ?? 'Workflow 执行失败')
-      },
-      onError(error) {
-        message.error(error?.message ?? 'Workflow 同意失败')
-      },
-    })
+    )
   } catch (error: any) {
-    message.error(error?.message ?? 'Workflow 同意失败')
+    message.error(
+      error?.message ?? 'Workflow 同意失败',
+    )
   } finally {
     workflowBusy.value = false
     localTransition.value = null
@@ -604,34 +720,67 @@ async function approveWorkflow() {
 
 async function rejectWorkflow() {
   const feedback = workflowFeedback.value.trim()
+
   if (!feedback) {
     message.warning('请先填写修改意见')
     return
   }
+
   if (!activeWorkflow.value || workflowBusy.value) return
+
+  const workflowId = activeWorkflow.value.id
+  const idempotencyKey =
+    getWorkflowActionKey(
+      workflowId,
+      'REJECT',
+      feedback,
+    )
 
   workflowBusy.value = true
   localTransition.value = 'REJECTING'
-  try {
-    const workflowId = activeWorkflow.value.id
 
-    await aiApi.streamRejectWorkflow(workflowId, feedback, {
-      onStep: applyWorkflowStepEvent,
-      onContentDelta: applyWorkflowContentDelta,
-      async onStop(data) {
-        await applyWorkflowStreamResult(data)
-        resetWorkflowRejectUI()
+  try {
+    await aiApi.streamRejectWorkflow(
+      workflowId,
+      feedback,
+      idempotencyKey,
+      {
+        onStep: applyWorkflowStepEvent,
+
+        onContentDelta: applyWorkflowContentDelta,
+
+        async onStop(data) {
+          await applyWorkflowStreamResult(data)
+          clearWorkflowActionKey(workflowId, 'REJECT')
+          resetWorkflowRejectUI()
+        },
+
+        async onWorkflowError(data) {
+          await applyWorkflowStreamResult(data)
+
+          if (data.workflow) {
+            clearWorkflowActionKey(workflowId, 'REJECT')
+          }
+
+          message.error(
+            data.message
+              ?? data.workflow?.errorMessage
+              ?? 'Workflow 修改失败',
+          )
+        },
+
+        onError(error) {
+          // 网络失败保留相同 Key
+          message.error(
+            error?.message ?? 'Workflow 修改失败',
+          )
+        },
       },
-      async onWorkflowError(data) {
-        await applyWorkflowStreamResult(data)
-        message.error(data.message ?? data.workflow?.errorMessage ?? 'Workflow 修改失败')
-      },
-      onError(error) {
-        message.error(error?.message ?? 'Workflow 修改失败')
-      },
-    })
+    )
   } catch (error: any) {
-    message.error(error?.message ?? 'Workflow 修改失败')
+    message.error(
+      error?.message ?? 'Workflow 修改失败',
+    )
   } finally {
     workflowBusy.value = false
     localTransition.value = null
@@ -641,29 +790,54 @@ async function rejectWorkflow() {
 async function retryWorkflow() {
   if (!activeWorkflow.value || workflowBusy.value) return
 
+  const workflowId = activeWorkflow.value.id
+  const idempotencyKey =
+    getWorkflowActionKey(workflowId, 'RETRY')
+
   workflowBusy.value = true
   localTransition.value = 'RETRYING'
-  try {
-    const workflowId = activeWorkflow.value.id
 
-    await aiApi.streamRetryWorkflow(workflowId, {
-      onStep: applyWorkflowStepEvent,
-      onContentDelta: applyWorkflowContentDelta,
-      async onStop(data) {
-        await applyWorkflowStreamResult(data)
-        resetWorkflowRejectUI()
-        message.success('Workflow 已重试')
+  try {
+    await aiApi.streamRetryWorkflow(
+      workflowId,
+      idempotencyKey,
+      {
+        onStep: applyWorkflowStepEvent,
+
+        onContentDelta: applyWorkflowContentDelta,
+
+        async onStop(data) {
+          await applyWorkflowStreamResult(data)
+          clearWorkflowActionKey(workflowId, 'RETRY')
+          resetWorkflowRejectUI()
+          message.success('Workflow 已重试')
+        },
+
+        async onWorkflowError(data) {
+          await applyWorkflowStreamResult(data)
+
+          if (data.workflow) {
+            clearWorkflowActionKey(workflowId, 'RETRY')
+          }
+
+          message.error(
+            data.message
+              ?? data.workflow?.errorMessage
+              ?? 'Workflow 重试失败',
+          )
+        },
+
+        onError(error) {
+          message.error(
+            error?.message ?? 'Workflow 重试失败',
+          )
+        },
       },
-      async onWorkflowError(data) {
-        await applyWorkflowStreamResult(data)
-        message.error(data.message ?? data.workflow?.errorMessage ?? 'Workflow 重试失败')
-      },
-      onError(error) {
-        message.error(error?.message ?? 'Workflow 重试失败')
-      },
-    })
+    )
   } catch (error: any) {
-    message.error(error?.message ?? 'Workflow 重试失败')
+    message.error(
+      error?.message ?? 'Workflow 重试失败',
+    )
   } finally {
     workflowBusy.value = false
     localTransition.value = null
@@ -745,6 +919,49 @@ function applyWorkflowStepEvent(event: WorkflowStepEvent) {
     workflowStepLogs.value[workflowId] = [...oldList]
   } else {
     workflowStepLogs.value[workflowId] = [runningLog, ...oldList]
+  }
+}
+
+/** 初始 Workflow 尚未收到最终 STOP 时，先用步骤事件创建临时卡片。 */
+function applyInitialWorkflowStepCard(
+  event: WorkflowStepEvent,
+  messageIndex: number,
+) {
+  const workflowId = event.workflowRunId
+  if (!workflowId || !event.workflowType) return
+
+  const message = messages.value[messageIndex]
+  const existing = message?.workflow?.id === workflowId
+    ? message.workflow
+    : activeWorkflow.value?.id === workflowId
+      ? activeWorkflow.value
+      : null
+
+  const workflow: AiWorkflowRun = existing
+    ? {
+        ...existing,
+        currentStep: event.step as AiWorkflowRun['currentStep'],
+        status: existing.status === 'FAILED' ? existing.status : 'RUNNING',
+      }
+    : {
+        id: workflowId,
+        workflowType: event.workflowType,
+        workflowVersion: '1.0',
+        status: 'RUNNING',
+        currentStep: event.step as AiWorkflowRun['currentStep'],
+        context: {
+          workflowVersion: '1.0',
+          variables: {},
+        },
+      }
+
+  activeWorkflow.value = workflow
+
+  if (message?.role === 'ai' && message.id === '') {
+    messages.value[messageIndex] = {
+      ...message,
+      workflow,
+    }
   }
 }
 
@@ -1412,6 +1629,15 @@ async function send(text?: string, skipUserMessage = false) {
         }
         await scrollToBottom()
       },
+      async onWorkflowStep(event) {
+        applyWorkflowStepEvent(event)
+        applyInitialWorkflowStepCard(event, aiPlaceholderIndex)
+        await scrollToBottom()
+      },
+      async onWorkflowContentDelta(event) {
+        applyWorkflowContentDelta(event)
+        await scrollToBottom()
+      },
       async onStop(session, assistantMessage, navigate, editorAction, articleAction, references, workflow) {
         abortController = null
 
@@ -1932,10 +2158,10 @@ watch(visible, async (v) => {
           <!-- 消息列表 -->
           <div v-else class="ai-messages">
             <template v-for="(msg, i) in messages" :key="msg.id || i">
-              <div
-                class="ai-msg"
-                :class="msg.role"
-              >
+                <div
+                  class="ai-msg"
+                  :class="[msg.role, { 'has-workflow': msg.workflow }]"
+                >
                 <span class="ai-msg-avatar">
                   <template v-if="msg.role === 'ai'">🤖</template>
                   <img
@@ -2996,6 +3222,19 @@ watch(visible, async (v) => {
   align-self: flex-start;
 }
 
+.ai-msg.ai.has-workflow {
+  width: 88%;
+}
+
+.ai-msg.ai.has-workflow .ai-msg-bubble-wrapper {
+  flex: 1 1 0;
+}
+
+.ai-msg.ai.has-workflow .ai-msg-bubble {
+  display: table;
+  max-width: 100%;
+}
+
 .ai-msg-avatar {
   font-size: 20px;
   line-height: 1;
@@ -3953,6 +4192,8 @@ watch(visible, async (v) => {
    ============================================================ */
 
 .ai-workflow-card {
+  width: 100%;
+  box-sizing: border-box;
   margin-top: 8px;
   border: 1px solid #bfdbfe;
   border-radius: 10px;

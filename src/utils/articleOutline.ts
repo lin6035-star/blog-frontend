@@ -1,4 +1,5 @@
 import { Marked, Renderer, type Tokens } from 'marked'
+import { sanitizeHtml } from './sanitizeHtml'
 
 export interface ArticleOutlineItem {
   id: string
@@ -58,7 +59,7 @@ export function renderArticleWithOutline(markdown: string): RenderedArticleWithO
   const marked = new Marked({ renderer })
 
   return {
-    html: marked.parse(markdown) as string,
+    html: sanitizeHtml(marked.parse(markdown) as string),
     outline,
   }
 }
