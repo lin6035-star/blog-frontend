@@ -343,6 +343,8 @@ export interface PageContext {
 export interface StreamCallbacks {
   onParam: (session: AiSession, userMessage: AiMessage) => void
   onData: (chunk: string) => Promise<void> | void
+  onWorkflowStep?: (event: WorkflowStepEvent) => Promise<void> | void
+  onWorkflowContentDelta?: (event: WorkflowContentDeltaEvent) => Promise<void> | void
   onStop: (
     session: AiSession,
     assistantMessage: AiMessage,
@@ -363,6 +365,7 @@ export interface StreamCallbacks {
 
 export interface WorkflowStepEvent {
   workflowRunId: string
+  workflowType?: WorkflowType
   action?: string
   step?: string
   status: string
@@ -526,6 +529,10 @@ async function streamChat(
             await callbacks.onData(String(event.eventData ?? ''))
             // 让出事件循环，给 Vue 一次渲染机会，避免所有 chunk 积压到同一帧
             await new Promise((resolve) => setTimeout(resolve, 0))
+          } else if (event.eventType === EVENT_WORKFLOW_STEP) {
+            await callbacks.onWorkflowStep?.(event.eventData as WorkflowStepEvent)
+          } else if (event.eventType === EVENT_WORKFLOW_CONTENT_DELTA) {
+            await callbacks.onWorkflowContentDelta?.(event.eventData as WorkflowContentDeltaEvent)
           } else if (event.eventType === EVENT_STOP) {
             stopped = true
             const data = event.eventData as {
@@ -580,6 +587,7 @@ async function streamChat(
 async function streamWorkflowAction(
   url: string,
   body: Record<string, unknown> | undefined,
+  idempotencyKey: string,
   callbacks: WorkflowStreamCallbacks,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -591,6 +599,7 @@ async function streamWorkflowAction(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
@@ -770,33 +779,83 @@ export const aiApi = {
   },
 
   /** 同意 Workflow 当前步骤 */
-  approveWorkflow(id: string) {
-    return request.post<AiWorkflowRun>(`/ai/workflows/${id}/approve`)
+  approveWorkflow(id: string, idempotencyKey: string) {
+    return request.post<AiWorkflowRun>(
+      `/ai/workflows/${id}/approve`,
+      undefined,
+      { headers: { 'Idempotency-Key': idempotencyKey } },
+    )
   },
 
   /** 拒绝 Workflow 当前步骤并反馈 */
-  rejectWorkflow(id: string, feedback: string) {
-    return request.post<AiWorkflowRun>(`/ai/workflows/${id}/reject`, { feedback })
+  rejectWorkflow(
+    id: string,
+    feedback: string,
+    idempotencyKey: string,
+  ) {
+    return request.post<AiWorkflowRun>(
+      `/ai/workflows/${id}/reject`,
+      { feedback },
+      { headers: { 'Idempotency-Key': idempotencyKey } },
+    )
   },
 
   /** 重试失败的 Workflow 当前步骤 */
-  retryWorkflow(id: string) {
-    return request.post<AiWorkflowRun>(`/ai/workflows/${id}/retry`)
+  retryWorkflow(id: string, idempotencyKey: string) {
+    return request.post<AiWorkflowRun>(
+      `/ai/workflows/${id}/retry`,
+      undefined,
+      { headers: { 'Idempotency-Key': idempotencyKey } },
+    )
   },
 
   /** 同意 Workflow 当前步骤（SSE） */
-  streamApproveWorkflow(id: string, callbacks: WorkflowStreamCallbacks, signal?: AbortSignal) {
-    return streamWorkflowAction(`/api/ai/workflows/${id}/approve/stream`, undefined, callbacks, signal)
+  streamApproveWorkflow(
+    id: string,
+    idempotencyKey: string,
+    callbacks: WorkflowStreamCallbacks,
+    signal?: AbortSignal,
+  ) {
+    return streamWorkflowAction(
+      `/api/ai/workflows/${id}/approve/stream`,
+      undefined,
+      idempotencyKey,
+      callbacks,
+      signal,
+    )
   },
 
   /** 拒绝 Workflow 当前步骤并反馈（SSE） */
-  streamRejectWorkflow(id: string, feedback: string, callbacks: WorkflowStreamCallbacks, signal?: AbortSignal) {
-    return streamWorkflowAction(`/api/ai/workflows/${id}/reject/stream`, { feedback }, callbacks, signal)
+  streamRejectWorkflow(
+    id: string,
+    feedback: string,
+    idempotencyKey: string,
+    callbacks: WorkflowStreamCallbacks,
+    signal?: AbortSignal,
+  ) {
+    return streamWorkflowAction(
+      `/api/ai/workflows/${id}/reject/stream`,
+      { feedback },
+      idempotencyKey,
+      callbacks,
+      signal,
+    )
   },
 
   /** 重试失败的 Workflow 当前步骤（SSE） */
-  streamRetryWorkflow(id: string, callbacks: WorkflowStreamCallbacks, signal?: AbortSignal) {
-    return streamWorkflowAction(`/api/ai/workflows/${id}/retry/stream`, undefined, callbacks, signal)
+  streamRetryWorkflow(
+    id: string,
+    idempotencyKey: string,
+    callbacks: WorkflowStreamCallbacks,
+    signal?: AbortSignal,
+  ) {
+    return streamWorkflowAction(
+      `/api/ai/workflows/${id}/retry/stream`,
+      undefined,
+      idempotencyKey,
+      callbacks,
+      signal,
+    )
   },
 
   /** 取消 Workflow */

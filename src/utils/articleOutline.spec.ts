@@ -39,4 +39,24 @@ describe('renderArticleWithOutline', () => {
     expect(result.html).toContain('代码里的标题')
     expect(result.html).not.toContain('id="heading-代码里的标题"')
   })
+
+  it('清除文章内容中的危险标签，outline 仍然正常', () => {
+    const result = renderArticleWithOutline(`
+## 安全标题
+
+<script>alert(1)</script>
+
+<img src=x onerror=alert(1)>
+
+<a href="javascript:alert(1)">点击</a>
+`)
+
+    expect(result.html).not.toContain('<script')
+    expect(result.html).not.toContain('onerror')
+    expect(result.html).not.toContain('javascript:')
+    expect(result.outline).toEqual([
+      { id: 'heading-安全标题', text: '安全标题', level: 2 },
+    ])
+    expect(result.html).toContain('<h2 id="heading-安全标题">安全标题</h2>')
+  })
 })
