@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import AppHeader from '@/components/layout/AppHeader.vue'
-import AiAssistant from '@/components/ai/AiAssistant.vue'
 </script>
 
 <template>
@@ -9,6 +8,5 @@ import AiAssistant from '@/components/ai/AiAssistant.vue'
     <main class="shell-main">
       <slot />
     </main>
-    <AiAssistant />
   </div>
 </template>

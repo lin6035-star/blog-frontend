@@ -188,6 +188,23 @@ describe('home information-flow layout', () => {
     expect(home).toContain("defineOptions({ name: 'HomeView' })")
   })
 
+  it('keeps the AI assistant mounted at app root instead of inside MainLayout', () => {
+    const app = readSource('App.vue')
+    const mainLayout = readSource('layouts/MainLayout.vue')
+
+    expect(app).toContain("import AiAssistant from '@/components/ai/AiAssistant.vue'")
+    expect(app).toContain('<AiAssistant />')
+    expect(mainLayout).not.toContain('AiAssistant')
+  })
+
+  it('lets page content receive clicks outside the visible AI assistant panel', () => {
+    const assistant = readSource('components/ai/AiAssistant.vue')
+
+    expect(assistant).toMatch(/\.ai-assistant\s*\{[^}]*pointer-events:\s*none;/s)
+    expect(assistant).toMatch(/\.ai-fab\s*\{[^}]*pointer-events:\s*auto;/s)
+    expect(assistant).toMatch(/\.ai-panel\s*\{[^}]*pointer-events:\s*auto;/s)
+  })
+
   it('refreshes home state only when users actively click header home entries', () => {
     const header = readSource('components/layout/AppHeader.vue')
     const home = readSource('views/HomeView.vue')

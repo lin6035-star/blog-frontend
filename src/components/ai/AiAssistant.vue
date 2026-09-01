@@ -35,6 +35,10 @@ import type {
   WorkflowStepEvent,
   WorkflowContentDeltaEvent,
   WorkflowStreamResult,
+  AgentStepView,
+  AgentStepEvent,
+  AgentStepHistoryItem,
+  AgentWriteProposal,
 } from '@/api/ai'
 import { emitAiEditorAction } from '@/utils/aiEditorBus'
 import { emitAiArticleAction } from '@/utils/aiArticleActionBus'
@@ -258,7 +262,7 @@ const WORKFLOW_ACTION_KEY_PREFIX = 'ai_workflow_action_key:'
 
 type PendingWorkflowAction = {
   workflowId: string
-  action: 'APPROVE' | 'REJECT' | 'RETRY'
+  action: 'APPROVE' | 'REJECT' | 'RETRY' | 'CONFIRM_SUGGEST'
   payload: string
   key: string
 }
@@ -340,6 +344,9 @@ function clearWorkflowActionKey(
     // ignore storage errors
   }
 }
+
+// V2.3：Agent 思考面板展开状态（全局：同一时刻通常只有一条 AI 消息在思考）
+const thinkingStepsExpanded = ref(false)
 
 // Workflow 流式正文：生成草稿时按 workflowId 累积 delta
 const workflowStreamingContent = ref<Record<string, string>>({})
@@ -886,6 +893,66 @@ function applyWorkflowContentDelta(event: WorkflowContentDeltaEvent) {
   }
 }
 
+/** V2.3：Agent 思考步骤实时累计到当前 AI 消息（按 stepNo upsert，RUNNING → SUCCESS/FAILED 更新状态） */
+function applyAgentStepEvent(event: AgentStepEvent, messageIndex: number) {
+  const current = messages.value[messageIndex]
+  if (!current || current.role !== 'ai') return
+
+  const steps = [...(current.thinkingSteps ?? [])]
+  const idx = steps.findIndex((s) => s.stepNo === event.stepNo)
+  const step: AgentStepView = {
+    stepNo: event.stepNo,
+    actionType: event.actionType,
+    status: event.status,
+    message: event.message,
+  }
+  if (idx >= 0) steps[idx] = step
+  else steps.push(step)
+  steps.sort((a, b) => a.stepNo - b.stepNo)
+
+  messages.value[messageIndex] = { ...current, thinkingSteps: steps }
+}
+
+/** V2.3：历史消息按 agentRunId 补拉思考步骤（刷新/切会话恢复思考面板） */
+async function hydrateThinkingSteps() {
+  // 注意：不排除有 workflow 的消息——confirm 后思考步骤与 Workflow 卡共存
+  const ids = Array.from(
+    new Set(
+      messages.value
+        .filter(
+          (msg) =>
+            msg.role === 'ai' &&
+            msg.agentRunId &&
+            !msg.thinkingSteps,
+        )
+        .map((msg) => msg.agentRunId as string),
+    ),
+  )
+  if (!ids.length) return
+
+  const results = await Promise.allSettled(ids.map((id) => aiApi.getAgentRunSteps(id)))
+  ids.forEach((id, i) => {
+    const steps = results[i].status === 'fulfilled' ? results[i].value?.data : null
+    if (!steps?.length) return
+    const idx = messages.value.findIndex(
+      (msg) => msg.agentRunId === id && !msg.thinkingSteps,
+    )
+    if (idx >= 0) {
+      messages.value[idx] = {
+        ...messages.value[idx],
+        thinkingSteps: steps
+          .map((s: AgentStepHistoryItem) => ({
+            stepNo: s.stepNo,
+            actionType: s.actionType,
+            status: s.status as AgentStepView['status'],
+            message: s.message ?? s.summary ?? s.actionType,
+          }))
+          .sort((a, b) => a.stepNo - b.stepNo),
+      }
+    }
+  })
+}
+
 /** 流式 step 事件：展开日志区并插入临时 RUNNING 日志 */
 function applyWorkflowStepEvent(event: WorkflowStepEvent) {
   const workflowId = event.workflowRunId
@@ -1282,8 +1349,177 @@ async function hydrateWorkflowMessages() {
   })
 }
 
-async function loadMessages(sid: string) {
-  loadingMessages.value = true
+/** V2.1：历史消息只带 agentRunId，补拉建议快照恢复建议卡（仅 WAITING_WORKFLOW_CONFIRM 渲染） */
+async function hydrateSuggestionMessages() {
+  const ids = Array.from(
+    new Set(
+      messages.value
+        .filter(
+          (msg) =>
+            msg.role === 'ai' &&
+            msg.agentRunId &&
+            !msg.workflowSuggestion &&
+            !msg.workflow,
+        )
+        .map((msg) => msg.agentRunId as string),
+    ),
+  )
+  if (!ids.length) return
+
+  const views = await Promise.allSettled(ids.map((id) => aiApi.getWorkflowSuggestion(id)))
+  ids.forEach((id, i) => {
+    const view = views[i].status === 'fulfilled' ? views[i].value?.data : null
+    if (!view?.suggestion || view.status !== 'WAITING_WORKFLOW_CONFIRM') return
+
+    const idx = messages.value.findIndex(
+      (msg) => msg.agentRunId === id && !msg.workflowSuggestion && !msg.workflow,
+    )
+    if (idx >= 0) {
+      messages.value[idx] = {
+        ...messages.value[idx],
+        workflowSuggestion: view.suggestion,
+        suggestionState: 'pending',
+      }
+    }
+  })
+}
+
+/** V2.4：确认写动作提案 → 后端标题匹配 + 执行 → 卡片消失（执行结果由后端返回） */
+async function confirmWriteAction(msg: AiMessage) {
+  if (!msg.agentRunId || !msg.writeAction) return
+  setWriteActionState(msg, 'processing')
+  try {
+    const res = await aiApi.confirmWriteAction(msg.agentRunId)
+    message.success(res.data ?? '已执行')
+    const idx = messages.value.findIndex((m) => m.id === msg.id)
+    if (idx >= 0) {
+      messages.value[idx] = {
+        ...messages.value[idx],
+        writeAction: undefined,
+        writeActionState: undefined,
+      }
+    }
+  } catch (e: any) {
+    setWriteActionState(msg, 'pending')
+    message.error(e?.message ?? '执行失败，请重试')
+  }
+}
+
+/** V2.4：取消写动作提案（不执行任何修改） */
+async function cancelWriteAction(msg: AiMessage) {
+  if (!msg.agentRunId) return
+  setWriteActionState(msg, 'processing')
+  try {
+    await aiApi.cancelWriteAction(msg.agentRunId)
+    setWriteActionState(msg, 'cancelled')
+  } catch (e: any) {
+    setWriteActionState(msg, 'pending')
+    message.error(e?.message ?? '取消失败，请重试')
+  }
+}
+
+function setWriteActionState(msg: AiMessage, state: AiMessage['writeActionState']) {
+  const idx = messages.value.findIndex((m) => m.id === msg.id)
+  if (idx >= 0) {
+    messages.value[idx] = { ...messages.value[idx], writeActionState: state }
+  }
+}
+
+/** V2.4：历史消息按 agentRunId 补拉写动作提案（刷新恢复写动作卡） */
+async function hydrateWriteActions() {
+  const ids = Array.from(
+    new Set(
+      messages.value
+        .filter(
+          (msg) =>
+            msg.role === 'ai' &&
+            msg.agentRunId &&
+            !msg.writeAction &&
+            !msg.workflow,
+        )
+        .map((msg) => msg.agentRunId as string),
+    ),
+  )
+  if (!ids.length) return
+
+  const views = await Promise.allSettled(ids.map((id) => aiApi.getWriteAction(id)))
+  ids.forEach((id, i) => {
+    const view = views[i].status === 'fulfilled' ? views[i].value?.data : null
+    if (!view?.proposal || view.status !== 'WAITING_WRITE_CONFIRM') return
+    const idx = messages.value.findIndex(
+      (msg) => msg.agentRunId === id && !msg.writeAction && !msg.workflow,
+    )
+    if (idx >= 0) {
+      messages.value[idx] = {
+        ...messages.value[idx],
+        writeAction: view.proposal,
+        writeActionState: 'pending',
+      }
+    }
+  })
+}
+
+/** V2.1：确认 Agent 建议 → 后端启动学习类 Workflow → 返回的 Workflow 快照直接挂回消息渲染 Workflow 卡 */
+async function confirmSuggestion(msg: AiMessage) {
+  if (!msg.agentRunId || !msg.workflowSuggestion) return
+  setMessageState(msg, 'processing')
+
+  const key = getWorkflowActionKey(msg.agentRunId, 'CONFIRM_SUGGEST')
+  try {
+    const res = await aiApi.confirmWorkflowSuggestion(msg.agentRunId, key)
+    clearWorkflowActionKey(msg.agentRunId, 'CONFIRM_SUGGEST')
+    const workflow = res.data
+    const idx = messages.value.findIndex((m) => m.id === msg.id)
+    if (idx >= 0) {
+      messages.value[idx] = {
+        ...messages.value[idx],
+        workflow,
+        workflowRunId: workflow.id,
+        workflowSuggestion: undefined,
+        suggestionState: undefined,
+      }
+    }
+    // 激活底部工作流面板（与正常 Workflow 创建一致）
+    activeWorkflow.value = workflow
+    message.success('已启动 ' + workflowLabel(workflow.workflowType))
+  } catch (e: any) {
+    setMessageState(msg, 'pending')
+    message.error(e?.message ?? '启动失败，请重试')
+  }
+}
+
+/** V2.1：取消 Agent 建议（不启动 Workflow） */
+async function cancelSuggestion(msg: AiMessage) {
+  if (!msg.agentRunId) return
+  setMessageState(msg, 'processing')
+  try {
+    await aiApi.cancelWorkflowSuggestion(msg.agentRunId)
+    setMessageState(msg, 'cancelled')
+  } catch (e: any) {
+    setMessageState(msg, 'pending')
+    message.error(e?.message ?? '取消失败，请重试')
+  }
+}
+
+function setMessageState(msg: AiMessage, state: AiMessage['suggestionState']) {
+  const idx = messages.value.findIndex((m) => m.id === msg.id)
+  if (idx >= 0) {
+    messages.value[idx] = { ...messages.value[idx], suggestionState: state }
+  }
+}
+
+function workflowLabel(type: WorkflowType): string {
+  return type === 'OPTIMIZE_ARTICLE' ? '文章优化 Workflow' : type === 'LEARNING_PLAN' ? '学习规划 Workflow' : type === 'LEARNING_PROGRESS' ? '学习进度 Workflow' : type === 'LEARNING_ASSIST' ? '难点攻坚 Workflow' : '文章创作 Workflow'
+}
+
+// V3.0：思考中刷新补拉。Agent/流式回复尚未落库时（最后一条是用户消息），
+// 立即渲染「思考中」占位 + 每 3 秒静默重拉（最多 6 次），落库后自然替换，
+// 避免「刷新后 AI 回复和思考面板丢失」以及「突然整条跳出」的突兀感。
+let pendingReplyReloadTimer: number | null = null
+let pendingReplyReloadAttempts = 0
+
+async function loadMessages(sid: string, silent = false) {
+  if (!silent) loadingMessages.value = true
   try {
     const res = await aiApi.getMessages(sid)
     // 从 localStorage 恢复 references（后端未持久化，刷新会丢失）
@@ -1298,12 +1534,43 @@ async function loadMessages(sid: string) {
     })
     // 历史 workflow 卡片：后端消息不带 workflow 对象，按 workflowRunId 补拉
     await hydrateWorkflowMessages()
+    // V2.1：历史 Agent 建议卡：按 agentRunId 补拉建议快照
+    await hydrateSuggestionMessages()
+    // V2.3：历史 Agent 思考步骤：按 agentRunId 补拉（刷新恢复思考面板）
+    await hydrateThinkingSteps()
+    // V2.4：历史 Agent 写动作提案：按 agentRunId 补拉（刷新恢复写动作卡）
+    await hydrateWriteActions()
     await scrollToBottom(true)
   } catch {
     message.error('加载消息失败')
   } finally {
     loadingMessages.value = false
+    schedulePendingReplyReload(sid)
   }
+}
+
+/** V3.0：最后一条是用户消息且无 AI 回复（可能是流式/Agent 落库前刷新）→ 占位 + 轮询补拉 */
+function schedulePendingReplyReload(sid: string) {
+  const last = messages.value[messages.value.length - 1]
+  if (!last || last.role !== 'user') return
+  if (pendingReplyReloadAttempts >= 6) return
+  pendingReplyReloadAttempts++
+  // 确保有「思考中」占位（每次整体替换后重新补）
+  if (messages.value[messages.value.length - 1]?.role === 'user') {
+    messages.value.push({
+      id: '',
+      sessionId: sid,
+      role: 'ai',
+      content: '🤔 正在思考中…',
+      createdAt: new Date().toISOString(),
+    })
+  }
+  if (pendingReplyReloadTimer) clearTimeout(pendingReplyReloadTimer)
+  pendingReplyReloadTimer = window.setTimeout(async () => {
+    // 用户已发起新消息 → 放弃补拉（避免整体替换冲掉正在流式的临时消息）
+    if (sending.value) return
+    await loadMessages(sid, true)
+  }, 3000)
 }
 
 /** 刷新/切会话后恢复 active workflow：从 session 的 activeWorkflowRunId 拉取并挂回消息 */
@@ -1634,7 +1901,11 @@ async function send(text?: string, skipUserMessage = false) {
         applyWorkflowContentDelta(event)
         await scrollToBottom()
       },
-      async onStop(session, assistantMessage, navigate, editorAction, articleAction, references, workflow) {
+      async onAgentStep(event) {
+        applyAgentStepEvent(event, aiPlaceholderIndex)
+        await scrollToBottom()
+      },
+      async onStop(session, assistantMessage, navigate, editorAction, articleAction, references, workflow, workflowSuggestion, writeAction) {
         abortController = null
 
         const legacyNavigate = extractLegacyNavigate(assistantMessage.content)
@@ -1643,6 +1914,10 @@ async function send(text?: string, skipUserMessage = false) {
           content: legacyNavigate.cleanContent,
           references: references ?? assistantMessage.references ?? [],
           workflow: workflow ?? (assistantMessage as any).workflow,
+          workflowSuggestion: workflowSuggestion ?? (assistantMessage as any).workflowSuggestion,
+          suggestionState: workflowSuggestion ? 'pending' : undefined,
+          writeAction: writeAction ?? (assistantMessage as any).writeAction,
+          writeActionState: writeAction ? 'pending' : undefined,
         }
         navigate = navigate ?? legacyNavigate.navigate
 
@@ -1651,7 +1926,7 @@ async function send(text?: string, skipUserMessage = false) {
           activeWorkflow.value = workflow
         }
 
-        // 用后端返回的完整数据替换 AI 占位
+        // 用后端返回的完整数据替换 AI 占位（保留实时累计的思考步骤 V2.3）
         let idx = -1
         for (let i = messages.value.length - 1; i >= 0; i--) {
           if (messages.value[i].role === 'ai' && messages.value[i].id === '') {
@@ -1659,7 +1934,12 @@ async function send(text?: string, skipUserMessage = false) {
             break
           }
         }
-        if (idx >= 0) messages.value[idx] = assistantMessage
+        if (idx >= 0) {
+          messages.value[idx] = {
+            ...assistantMessage,
+            thinkingSteps: messages.value[idx].thinkingSteps,
+          }
+        }
 
         // 持久化 references 到 localStorage，防止刷新丢失（后端未存 references）
         const refs = assistantMessage.references
@@ -2173,6 +2453,40 @@ watch(visible, async (v) => {
                   <span v-if="isMessageStreaming(i, msg.role)" class="ai-typing-dots"><i class="dot" /><i class="dot" /><i class="dot" /></span>
                 </div>
 
+                <!-- Agent 思考过程（V2.3）：折叠条 + 步骤列表，实时推流 -->
+                <div
+                  v-if="msg.role === 'ai' && msg.thinkingSteps?.length"
+                  class="ai-thinking"
+                >
+                  <button
+                    class="ai-thinking__toggle"
+                    type="button"
+                    @click="thinkingStepsExpanded = !thinkingStepsExpanded"
+                  >
+                    <span class="ai-thinking__icon">🤔</span>
+                    <span class="ai-thinking__title">
+                      思考过程（{{ msg.thinkingSteps.length }} 步）
+                    </span>
+                    <span class="ai-thinking__arrow">{{ thinkingStepsExpanded ? '▾' : '▸' }}</span>
+                  </button>
+                  <div v-if="thinkingStepsExpanded" class="ai-thinking__list">
+                    <div
+                      v-for="step in msg.thinkingSteps"
+                      :key="step.stepNo"
+                      class="ai-thinking__step"
+                    >
+                      <span class="ai-thinking__step-no">{{ step.stepNo }}</span>
+                      <span
+                        class="ai-thinking__step-status"
+                        :class="`ai-thinking__step-status--${step.status.toLowerCase()}`"
+                      >
+                        {{ step.status === 'RUNNING' ? '⏳' : step.status === 'SUCCESS' ? '✓' : '✗' }}
+                      </span>
+                      <span class="ai-thinking__step-message">{{ step.message }}</span>
+                    </div>
+                  </div>
+                </div>
+
                 <div
                   v-if="msg.role === 'ai' && msg.references?.length"
                   class="ai-rag-references"
@@ -2192,6 +2506,72 @@ watch(visible, async (v) => {
                     <span class="ai-rag-item-snippet">{{ reference.snippet }}</span>
                     <span class="ai-rag-item-meta">片段 {{ reference.chunkIndex + 1 }}</span>
                   </button>
+                </div>
+
+                <!-- Agent Workflow 建议卡（V2.1）：Agent 基于观察建议启动学习类 Workflow，需用户确认 -->
+                <div
+                  v-if="msg.role === 'ai' && msg.workflowSuggestion && msg.suggestionState !== 'cancelled' && msg.suggestionState !== 'expired'"
+                  class="ai-suggestion-card"
+                >
+                  <div class="ai-suggestion-card__head">
+                    <span class="ai-suggestion-card__badge">Agent 建议</span>
+                    <span class="ai-suggestion-card__type">
+                      {{ msg.workflowSuggestion.workflowType === 'LEARNING_PLAN' ? '制定学习计划' : msg.workflowSuggestion.workflowType === 'LEARNING_PROGRESS' ? '调整学习进度' : msg.workflowSuggestion.workflowType === 'OPTIMIZE_ARTICLE' ? '文章优化' : '难点攻坚' }}
+                    </span>
+                  </div>
+                  <div class="ai-suggestion-card__reason">{{ msg.workflowSuggestion.reason }}</div>
+                  <div class="ai-suggestion-card__actions">
+                    <n-button
+                      size="small"
+                      type="primary"
+                      :loading="msg.suggestionState === 'processing'"
+                      :disabled="msg.suggestionState === 'processing'"
+                      @click="confirmSuggestion(msg)"
+                    >
+                      继续
+                    </n-button>
+                    <n-button
+                      size="small"
+                      :disabled="msg.suggestionState === 'processing'"
+                      @click="cancelSuggestion(msg)"
+                    >
+                      取消
+                    </n-button>
+                  </div>
+                </div>
+
+                <!-- Agent 写动作确认卡（V2.4）：勾选/取消勾选任务，需用户确认 -->
+                <div
+                  v-if="msg.role === 'ai' && msg.writeAction && msg.writeActionState !== 'cancelled' && msg.writeActionState !== 'expired'"
+                  class="ai-write-card"
+                >
+                  <div class="ai-write-card__head">
+                    <span class="ai-write-card__badge">写动作提案</span>
+                    <span class="ai-write-card__type">
+                      {{ msg.writeAction.done ? '勾选任务为完成' : '取消任务完成状态' }}
+                    </span>
+                  </div>
+                  <div class="ai-write-card__reason">
+                    任务「{{ msg.writeAction.taskTitle }}」<template v-if="msg.writeAction.stageTitle">（阶段：{{ msg.writeAction.stageTitle }}）</template>
+                  </div>
+                  <div class="ai-write-card__actions">
+                    <n-button
+                      size="small"
+                      type="primary"
+                      :loading="msg.writeActionState === 'processing'"
+                      :disabled="msg.writeActionState === 'processing'"
+                      @click="confirmWriteAction(msg)"
+                    >
+                      继续
+                    </n-button>
+                    <n-button
+                      size="small"
+                      :disabled="msg.writeActionState === 'processing'"
+                      @click="cancelWriteAction(msg)"
+                    >
+                      取消
+                    </n-button>
+                  </div>
                 </div>
 
                 <!-- Workflow 卡片 -->
@@ -2948,6 +3328,7 @@ watch(visible, async (v) => {
   right: 24px;
   bottom: 120px;
   z-index: 1000;
+  pointer-events: none;
 }
 
 /* ============================================================
@@ -2962,6 +3343,7 @@ watch(visible, async (v) => {
   background: #2f6f73;
   box-shadow: 0 4px 16px rgba(47, 111, 115, 0.36);
   cursor: pointer;
+  pointer-events: auto;
   display: grid;
   place-items: center;
   transition: transform 0.2s, box-shadow 0.2s;
@@ -2994,6 +3376,7 @@ watch(visible, async (v) => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  pointer-events: auto;
   animation: ai-panel-in 0.24s ease-out;
   transition: width 0.3s, height 0.3s;
 }
@@ -4186,6 +4569,184 @@ watch(visible, async (v) => {
 /* ============================================================
    Workflow 消息卡片
    ============================================================ */
+
+/* Agent 思考过程（V2.3）：折叠条 + 步骤列表，与建议卡同风格 */
+.ai-thinking {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fafafa;
+  overflow: hidden;
+}
+
+.ai-thinking__toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.ai-thinking__toggle:hover {
+  background: #f3f4f6;
+}
+
+.ai-thinking__icon {
+  font-size: 13px;
+}
+
+.ai-thinking__title {
+  flex: 1;
+  text-align: left;
+}
+
+.ai-thinking__arrow {
+  font-size: 10px;
+  color: #9ca3af;
+}
+
+.ai-thinking__list {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #f0f0f0;
+  padding: 4px 0;
+}
+
+.ai-thinking__step {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.ai-thinking__step-no {
+  color: #9ca3af;
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
+.ai-thinking__step-status {
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
+.ai-thinking__step-status--running {
+  color: #2563eb;
+}
+
+.ai-thinking__step-status--success {
+  color: #16a34a;
+}
+
+.ai-thinking__step-status--failed {
+  color: #dc2626;
+}
+
+.ai-thinking__step-message {
+  color: #4b5563;
+  word-break: break-all;
+}
+
+/* Agent 写动作确认卡（V2.4）：与建议卡同风格 */
+.ai-write-card {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 8px;
+  border: 1px dashed #fcd34d;
+  border-radius: 10px;
+  background: #fffbeb;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-write-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-write-card__badge {
+  font-size: 13px;
+  font-weight: 700;
+  color: #b45309;
+}
+
+.ai-write-card__type {
+  font-size: 12px;
+  color: #b45309;
+  background: #fef3c7;
+  border-radius: 4px;
+  padding: 1px 8px;
+}
+
+.ai-write-card__reason {
+  font-size: 13px;
+  color: #374151;
+  line-height: 1.6;
+}
+
+.ai-write-card__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* Agent Workflow 建议卡（V2.1）：Agent 建议 + 用户确认，与 Workflow 卡同风格 */
+.ai-suggestion-card {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 8px;
+  border: 1px dashed #93c5fd;
+  border-radius: 10px;
+  background: #f5f9ff;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-suggestion-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-suggestion-card__badge {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+.ai-suggestion-card__type {
+  font-size: 12px;
+  color: #2563eb;
+  background: #dbeafe;
+  border-radius: 4px;
+  padding: 1px 8px;
+}
+
+.ai-suggestion-card__reason {
+  font-size: 13px;
+  color: #374151;
+  line-height: 1.6;
+}
+
+.ai-suggestion-card__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
 
 .ai-workflow-card {
   width: 100%;
