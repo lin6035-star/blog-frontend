@@ -38,7 +38,7 @@ import type {
   AgentStepView,
   AgentStepEvent,
   AgentStepHistoryItem,
-  AgentWriteProposal,
+  WorkflowType,
 } from '@/api/ai'
 import { emitAiEditorAction } from '@/utils/aiEditorBus'
 import { emitAiArticleAction } from '@/utils/aiArticleActionBus'
