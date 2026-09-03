@@ -38,6 +38,7 @@ import type {
   AgentStepView,
   AgentStepEvent,
   AgentStepHistoryItem,
+  AgentWriteProposal,
   WorkflowType,
 } from '@/api/ai'
 import { emitAiEditorAction } from '@/utils/aiEditorBus'
@@ -1385,6 +1386,20 @@ async function hydrateSuggestionMessages() {
 }
 
 /** V2.4：确认写动作提案 → 后端标题匹配 + 执行 → 卡片消失（执行结果由后端返回） */
+// V3.1：写动作卡按内层 actionType 渲染——不能按 done 判断（ADD 的 done 恒 false，会错显成「取消任务完成状态」）
+function writeActionTypeLabel(w: AgentWriteProposal): string {
+  if (w.actionType === 'ADD_LEARNING_TASK') return '追加学习任务'
+  return w.done ? '勾选任务为完成' : '取消任务完成状态'
+}
+function writeActionReason(w: AgentWriteProposal): string {
+  if (w.actionType === 'ADD_LEARNING_TASK') {
+    const plan = w.planRef ? `「${w.planRef}」` : ''
+    const stage = w.stageTitle ? ` · 阶段「${w.stageTitle}」` : ''
+    return `向 计划${plan}${stage} 追加任务「${w.taskTitle}」`
+  }
+  return `任务「${w.taskTitle}」` + (w.stageTitle ? `（阶段：${w.stageTitle}）` : '')
+}
+
 async function confirmWriteAction(msg: AiMessage) {
   if (!msg.agentRunId || !msg.writeAction) return
   setWriteActionState(msg, 'processing')
@@ -2548,11 +2563,11 @@ watch(visible, async (v) => {
                   <div class="ai-write-card__head">
                     <span class="ai-write-card__badge">写动作提案</span>
                     <span class="ai-write-card__type">
-                      {{ msg.writeAction.done ? '勾选任务为完成' : '取消任务完成状态' }}
+                      {{ writeActionTypeLabel(msg.writeAction) }}
                     </span>
                   </div>
                   <div class="ai-write-card__reason">
-                    任务「{{ msg.writeAction.taskTitle }}」<template v-if="msg.writeAction.stageTitle">（阶段：{{ msg.writeAction.stageTitle }}）</template>
+                    {{ writeActionReason(msg.writeAction) }}
                   </div>
                   <div class="ai-write-card__actions">
                     <n-button
