@@ -79,8 +79,61 @@ export interface AiMessage {
   references?: ArticleRagReference[]
   workflowRunId?: string
   workflow?: AiWorkflowRun
+  /** V2.1：关联的 Agent Run（建议卡快照恢复用） */
+  agentRunId?: string
+  /** V2.3：Agent 思考步骤（实时 AGENT_STEP 事件累计 / 历史补拉挂回） */
+  thinkingSteps?: AgentStepView[]
+  /** V2.1：Agent 待确认的 Workflow 建议（STOP event 透出 / 历史补拉挂回） */
+  workflowSuggestion?: WorkflowSuggestion
+  /** V2.4：Agent 待确认的写动作提案（STOP event 透出 / 历史补拉挂回） */
+  writeAction?: AgentWriteProposal
+  /** V2.4 前端临时状态：写动作卡交互态（pending/processing/confirmed/cancelled/expired） */
+  writeActionState?: 'pending' | 'processing' | 'confirmed' | 'cancelled' | 'expired'
+  /** V2.1 前端临时状态：suggestion 卡片交互态（pending/processing/confirmed/cancelled/expired） */
+  suggestionState?: 'pending' | 'processing' | 'confirmed' | 'cancelled' | 'expired'
   /** 前端临时状态：该消息刚被复制过（按钮短暂显示 ✔） */
   copied?: boolean
+}
+
+/** Agent 写动作提案（V2.4 / V3.1）：LLM 只给标题类信息，索引由后端匹配 */
+export interface AgentWriteProposal {
+  /** 写动作类型：UPDATE_TASK_DONE=勾选/取消勾选已有任务（done 生效）；ADD_LEARNING_TASK=追加新任务（done 忽略） */
+  actionType: 'UPDATE_TASK_DONE' | 'ADD_LEARNING_TASK'
+  planRef?: string
+  stageTitle?: string
+  taskTitle: string
+  done: boolean
+}
+
+/** Agent 思考步骤（V2.3）：status = RUNNING / SUCCESS / FAILED */
+export interface AgentStepView {
+  stepNo: number
+  actionType: string
+  status: 'RUNNING' | 'SUCCESS' | 'FAILED'
+  message: string
+}
+
+/** V2.2 后端 AgentStepVO 结构（历史恢复时映射为 AgentStepView） */
+export interface AgentStepHistoryItem {
+  stepNo: number
+  actionType: string
+  status: string
+  /** 展示文案（与实时 AGENT_STEP 事件一致，刷新前后不串味） */
+  message?: string | null
+  summary?: string | null
+  errorMessage?: string | null
+  durationMs?: number | null
+  createdAt?: string
+}
+
+/** Agent 建议的 Workflow（V2.1）：确认后才由后端启动，Agent 无法直接启动 */
+export interface WorkflowSuggestion {
+  workflowType: WorkflowType
+  reason: string
+  initialMessage?: string
+  risk?: 'LOW' | 'MEDIUM' | 'HIGH'
+  /** V2.5 文章侧建议：目标文章 ID（仅 OPTIMIZE_ARTICLE 建议携带，前端只透传不渲染） */
+  articleId?: string
 }
 
 export interface NavigateCommand {
@@ -346,6 +399,8 @@ export interface StreamCallbacks {
   onData: (chunk: string) => Promise<void> | void
   onWorkflowStep?: (event: WorkflowStepEvent) => Promise<void> | void
   onWorkflowContentDelta?: (event: WorkflowContentDeltaEvent) => Promise<void> | void
+  /** V2.3：Agent 思考步骤事件（实时） */
+  onAgentStep?: (event: AgentStepEvent) => Promise<void> | void
   onStop: (
     session: AiSession,
     assistantMessage: AiMessage,
@@ -354,6 +409,8 @@ export interface StreamCallbacks {
     articleAction?: ArticleAction,
     references?: ArticleRagReference[],
     workflow?: AiWorkflowRun,
+    workflowSuggestion?: WorkflowSuggestion,
+    writeAction?: AgentWriteProposal,
   ) => void
   onError: (error: Error) => void
   /** 用户主动停止生成，前端自行处理（保留已输出内容） */
@@ -363,6 +420,14 @@ export interface StreamCallbacks {
 // ============================================================
 // Workflow 流式事件
 // ============================================================
+
+/** Agent 思考步骤事件（V2.3，SSE 实时推送） */
+export interface AgentStepEvent {
+  stepNo: number
+  actionType: string
+  status: 'RUNNING' | 'SUCCESS' | 'FAILED'
+  message: string
+}
 
 export interface WorkflowStepEvent {
   workflowRunId: string
@@ -417,6 +482,7 @@ interface AiMessageRaw {
   createdAt: string
   references?: ArticleRagReference[]
   workflowRunId?: string
+  agentRunId?: string
 }
 
 // ============================================================
@@ -428,6 +494,7 @@ function mapMessage(m: AiMessageRaw): AiMessage {
     ...m,
     role: m.role === 'assistant' ? 'ai' : m.role,
     workflowRunId: m.workflowRunId,
+    agentRunId: m.agentRunId,
   }
 }
 
@@ -447,6 +514,7 @@ const EVENT_WORKFLOW_STEP = 2001
 const EVENT_WORKFLOW_STOP = 2002
 const EVENT_WORKFLOW_ERROR = 2003
 const EVENT_WORKFLOW_CONTENT_DELTA = 2004
+const EVENT_AGENT_STEP = 3001
 
 async function streamChat(
   sessionId: string | null,
@@ -534,6 +602,8 @@ async function streamChat(
             await callbacks.onWorkflowStep?.(event.eventData as WorkflowStepEvent)
           } else if (event.eventType === EVENT_WORKFLOW_CONTENT_DELTA) {
             await callbacks.onWorkflowContentDelta?.(event.eventData as WorkflowContentDeltaEvent)
+          } else if (event.eventType === EVENT_AGENT_STEP) {
+            await callbacks.onAgentStep?.(event.eventData as AgentStepEvent)
           } else if (event.eventType === EVENT_STOP) {
             stopped = true
             const data = event.eventData as {
@@ -544,6 +614,8 @@ async function streamChat(
               articleAction?: ArticleAction
               references?: ArticleRagReference[]
               workflow?: AiWorkflowRun
+              workflowSuggestion?: WorkflowSuggestion
+              writeAction?: AgentWriteProposal
             }
 
             const assistantMessage = {
@@ -559,6 +631,8 @@ async function streamChat(
               data.articleAction,
               data.references,
               data.workflow,
+              data.workflowSuggestion,
+              data.writeAction,
             )
           }
         } catch {
@@ -772,6 +846,49 @@ export const aiApi = {
   /** 查询 Workflow 运行状态 */
   getWorkflowRun(id: string) {
     return request.get<AiWorkflowRun>(`/ai/workflows/${id}`)
+  },
+
+  /** 查询 Agent Run 建议快照（历史消息恢复建议卡，仅 WAITING_WORKFLOW_CONFIRM 返回 suggestion） */
+  getWorkflowSuggestion(agentRunId: string) {
+    return request.get<{ status: string; suggestion: WorkflowSuggestion | null }>(
+      `/ai/agent-runs/${agentRunId}/workflow-suggestion`,
+    )
+  },
+
+  /** V2.2：Agent Run 步骤列表（历史消息恢复思考面板；后端 VO 字段为 summary） */
+  getAgentRunSteps(agentRunId: string) {
+    return request.get<AgentStepHistoryItem[]>(`/ai/agent-runs/${agentRunId}/steps`)
+  },
+
+  /** 确认 Agent 建议：启动学习类 Workflow，返回 Workflow 快照（Idempotency-Key 防双击重复创建） */
+  confirmWorkflowSuggestion(agentRunId: string, idempotencyKey: string) {
+    return request.post<AiWorkflowRun>(
+      `/ai/agent-runs/${agentRunId}/workflow-suggestion/confirm`,
+      undefined,
+      { headers: { 'Idempotency-Key': idempotencyKey } },
+    )
+  },
+
+  /** 取消 Agent 建议：不启动任何 Workflow */
+  cancelWorkflowSuggestion(agentRunId: string) {
+    return request.post<string>(`/ai/agent-runs/${agentRunId}/workflow-suggestion/cancel`)
+  },
+
+  /** V2.4：确认写动作提案（标题匹配 → 执行），返回执行结果文案 */
+  confirmWriteAction(agentRunId: string) {
+    return request.post<string>(`/ai/agent-runs/${agentRunId}/write-action/confirm`)
+  },
+
+  /** V2.4：取消写动作提案（不执行任何修改） */
+  cancelWriteAction(agentRunId: string) {
+    return request.post<string>(`/ai/agent-runs/${agentRunId}/write-action/cancel`)
+  },
+
+  /** V2.4：写动作提案快照（历史消息恢复写动作卡） */
+  getWriteAction(agentRunId: string) {
+    return request.get<{ status: string; proposal: AgentWriteProposal | null }>(
+      `/ai/agent-runs/${agentRunId}/write-action`,
+    )
   },
 
   /** 查询 Workflow 步骤执行日志 */

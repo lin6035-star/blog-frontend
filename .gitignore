@@ -24,3 +24,9 @@ output
 *.njsproj
 *.sln
 *.sw?
+
+# Agent 调试产物（验证脚本/截图，不提交）
+debug_ls.py
+verify_*.py
+verify_*.png
+verify_result.json

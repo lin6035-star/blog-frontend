@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-const editorView = readFileSync(resolve(__dirname, 'EditorView.vue'), 'utf8')
+// normalize CRLF：Windows 工作区 checkout 可能带 \r，避免换行断言因行尾格式误判
+const editorView = readFileSync(resolve(__dirname, 'EditorView.vue'), 'utf8').replace(/\r\n/g, '\n')
 
 describe('editor publish state actions', () => {
   it('hides draft save entry points when editing a published article', () => {
