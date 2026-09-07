@@ -1388,9 +1388,11 @@ async function hydrateSuggestionMessages() {
 /** V2.4：确认写动作提案 → 后端标题匹配 + 执行 → 卡片消失（执行结果由后端返回） */
 // V3.1：写动作卡按内层 actionType 渲染——不能按 done 判断（ADD 的 done 恒 false，会错显成「取消任务完成状态」）
 // V3.3：重命名任务（UPDATE_LEARNING_TASK）——done 也恒 false，同样不能靠 done 判断
+// V3.4：改文章标题（UPDATE_ARTICLE_TITLE）——文章域动作，done 恒 false、taskTitle 为 null
 function writeActionTypeLabel(w: AgentWriteProposal): string {
   if (w.actionType === 'ADD_LEARNING_TASK') return '追加学习任务'
   if (w.actionType === 'UPDATE_LEARNING_TASK') return '重命名学习任务'
+  if (w.actionType === 'UPDATE_ARTICLE_TITLE') return '修改文章标题'
   return w.done ? '勾选任务为完成' : '取消任务完成状态'
 }
 function writeActionReason(w: AgentWriteProposal): string {
@@ -1403,6 +1405,10 @@ function writeActionReason(w: AgentWriteProposal): string {
     // 显式展示 旧名 → 新名，确认动作可审计（newTitle 兜底旧数据 undefined 不崩）
     const stage = w.stageTitle ? `（阶段：${w.stageTitle}）` : ''
     return `将任务「${w.taskTitle}」重命名为「${w.newTitle ?? '—'}」${stage}`
+  }
+  if (w.actionType === 'UPDATE_ARTICLE_TITLE') {
+    // V3.4：显式展示 旧标题 → 新标题（articleTitle = 提案时刻 DB 权威旧标题，兜底旧数据不崩）
+    return `将文章《${w.articleTitle ?? '—'}》标题改为《${w.newTitle ?? '—'}》`
   }
   return `任务「${w.taskTitle}」` + (w.stageTitle ? `（阶段：${w.stageTitle}）` : '')
 }
