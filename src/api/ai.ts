@@ -95,15 +95,24 @@ export interface AiMessage {
   copied?: boolean
 }
 
-/** Agent 写动作提案（V2.4 / V3.1 / V3.3）：LLM 只给标题类信息，索引由后端匹配 */
+/** Agent 写动作提案（V2.4 / V3.1 / V3.3 / V3.4）：LLM 只给标题类信息，索引/定位由后端匹配 */
 export interface AgentWriteProposal {
-  /** 写动作类型：UPDATE_TASK_DONE=勾选/取消勾选已有任务（done 生效）；ADD_LEARNING_TASK=追加新任务（done 忽略）；UPDATE_LEARNING_TASK=重命名已有任务（taskTitle=旧名 + newTitle=新名，done 忽略） */
-  actionType: 'UPDATE_TASK_DONE' | 'ADD_LEARNING_TASK' | 'UPDATE_LEARNING_TASK'
+  /**
+   * 写动作类型：
+   * UPDATE_TASK_DONE=勾选/取消勾选学习任务（done 生效）；
+   * ADD_LEARNING_TASK=追加学习任务（done 忽略）；
+   * UPDATE_LEARNING_TASK=重命名学习任务（taskTitle=旧名 + newTitle=新名，done 忽略）；
+   * UPDATE_ARTICLE_TITLE=改自己文章标题（V3.4，articleId/articleTitle 为文章域锚，taskTitle/planRef/stageTitle 为 null，done 恒 false）
+   */
+  actionType: 'UPDATE_TASK_DONE' | 'ADD_LEARNING_TASK' | 'UPDATE_LEARNING_TASK' | 'UPDATE_ARTICLE_TITLE'
   planRef?: string
   stageTitle?: string
-  taskTitle: string
+  taskTitle?: string
   newTitle?: string
   done: boolean
+  /** V3.4 文章域：目标文章 ID（页面上下文锚）与提案时刻 DB 权威旧标题（并发防护锚） */
+  articleId?: string
+  articleTitle?: string
 }
 
 /** Agent 思考步骤（V2.3）：status = RUNNING / SUCCESS / FAILED */
