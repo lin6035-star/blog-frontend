@@ -298,4 +298,27 @@ describe('home information-flow layout', () => {
     expect(css).toContain('.detail-outline-card')
     expect(css).toContain('scroll-margin-top: 92px')
   })
+
+  it('adds a single immersive reading toggle that collapses both article sidebars', () => {
+    const detail = readSource('views/ArticleDetailView.vue')
+    const css = readSource('styles/index.css')
+
+    expect(detail).toContain('const isImmersiveReading = computed')
+    expect(detail).toContain('function toggleImmersiveReading()')
+    expect(detail).toContain('leftCollapsed.value = next')
+    expect(detail).toContain('rightCollapsed.value = next')
+    expect(detail).toContain('class="detail-reading-mode-toggle"')
+    expect(detail).toContain(':class="{ active: isImmersiveReading }"')
+    expect(detail).toContain(':aria-pressed="isImmersiveReading"')
+    expect(detail).toContain("{{ isImmersiveReading ? '退出沉浸' : '沉浸阅读' }}")
+    expect(detail).toContain('<Contract v-if="isImmersiveReading" />')
+    expect(detail).toContain('<Expand v-else />')
+
+    expect(css).toContain('.detail-reading-mode-toggle')
+    expect(css).toContain('right: 24px')
+    expect(css).toContain('bottom: 188px')
+    expect(css).toContain('background: rgba(226, 244, 236, 0.96)')
+    expect(css).toContain('background: rgba(209, 239, 227, 0.98)')
+    expect(css).toContain('.detail-reading-mode-toggle.active')
+  })
 })

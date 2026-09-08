@@ -916,6 +916,51 @@ textarea {
   left: 4px;
 }
 
+/* ---- 沉浸阅读按钮（固定在 AI 助手上方） ---- */
+.detail-reading-mode-toggle {
+  position: fixed;
+  right: 24px;
+  bottom: 188px;
+  z-index: 1001;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 42px;
+  padding: 0 16px;
+  border: 1px solid rgba(47, 111, 115, 0.22);
+  border-radius: 10px;
+  background: rgba(226, 244, 236, 0.96);
+  color: var(--color-forest);
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(47, 111, 115, 0.14);
+  transition:
+    transform 0.18s ease,
+    background 0.18s ease,
+    color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.detail-reading-mode-toggle:hover {
+  transform: translateY(-1px);
+  background: rgba(209, 239, 227, 0.98);
+  border-color: rgba(47, 111, 115, 0.32);
+  box-shadow: 0 10px 26px rgba(47, 111, 115, 0.18);
+}
+
+.detail-reading-mode-toggle.active {
+  background: rgba(226, 244, 236, 0.96);
+  border-color: rgba(47, 111, 115, 0.26);
+  color: var(--color-forest);
+  box-shadow: 0 8px 22px rgba(47, 111, 115, 0.14);
+}
+
+.detail-reading-mode-toggle.active:hover {
+  background: rgba(209, 239, 227, 0.98);
+  border-color: rgba(47, 111, 115, 0.38);
+  box-shadow: 0 10px 26px rgba(47, 111, 115, 0.18);
+}
+
 /* ---- 右侧栏交错收起 ---- */
 .detail-author-card,
 .detail-outline-card {
@@ -942,6 +987,10 @@ textarea {
 @media (max-width: 900px) {
   .detail-sidebar-toggle,
   .detail-right-rail-toggle {
+    display: none;
+  }
+
+  .detail-reading-mode-toggle {
     display: none;
   }
 }
