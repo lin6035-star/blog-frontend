@@ -5,9 +5,11 @@ import { useMessage } from 'naive-ui'
 import {
   ArrowBack,
   ArrowUp,
+  Contract,
   ChevronBack,
   ChevronForward,
   Eye,
+  Expand,
   Heart,
   HeartOutline,
   Star,
@@ -45,6 +47,7 @@ const detailBackBarRef = ref<HTMLElement | null>(null)
 const isDetailBackBarStuck = ref(false)
 const leftCollapsed = ref(false)
 const rightCollapsed = ref(false)
+const isImmersiveReading = computed(() => leftCollapsed.value && rightCollapsed.value)
 
 const gridColumns = computed(() => {
   const left = leftCollapsed.value ? '0px' : '56px'
@@ -131,6 +134,12 @@ function scrollToOutlineItem(id: string) {
     behavior: 'smooth',
     block: 'start',
   })
+}
+
+function toggleImmersiveReading() {
+  const next = !isImmersiveReading.value
+  leftCollapsed.value = next
+  rightCollapsed.value = next
 }
 
 function showComingSoon(feature: string) {
@@ -380,6 +389,22 @@ onBeforeUnmount(() => {
         返回
       </button>
     </div>
+
+    <button
+      v-if="article"
+      class="detail-reading-mode-toggle"
+      type="button"
+      :class="{ active: isImmersiveReading }"
+      :title="isImmersiveReading ? '退出沉浸' : '沉浸阅读'"
+      :aria-pressed="isImmersiveReading"
+      @click="toggleImmersiveReading"
+    >
+      <n-icon size="16">
+        <Contract v-if="isImmersiveReading" />
+        <Expand v-else />
+      </n-icon>
+      <span>{{ isImmersiveReading ? '退出沉浸' : '沉浸阅读' }}</span>
+    </button>
 
     <div class="detail-layout" :style="{ gridTemplateColumns: gridColumns }">
       <aside class="detail-sidebar" :class="{ collapsed: leftCollapsed }">

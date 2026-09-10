@@ -113,6 +113,12 @@ function buildPageContext(): PageContext {
     const t = document.title.replace(/\s*-\s*海林Blog$/, '')
     if (t && t !== '文章详情') pageContext.articleTitle = t
   }
+  // 编辑已有文章的页面也带 articleId（此前只有详情页带，导致「这篇文章怎么样」没有指代对象，
+  // 直接被 Planner CTA 拦住）。后端按 pageType 区分措辞：编辑器里可能有未保存修改，
+  // AI 读到的是已保存版本，这一点必须对用户讲清楚。
+  if (name === 'editor-edit') {
+    pageContext.articleId = String(route.params.id ?? '')
+  }
   if (name === 'public-profile') {
     pageContext.userId = String(route.params.id ?? '')
   }
@@ -352,6 +358,9 @@ function clearWorkflowActionKey(
 
 // V2.3：Agent 思考面板展开状态（全局：同一时刻通常只有一条 AI 消息在思考）
 const thinkingStepsExpanded = ref(false)
+// V3.10：思考面板自动展开/收起——思考期间（AGENT_STEP）自动展开，
+// 正文开始输出（首个 DATA chunk）自动收起，用户可手动再展开（点击 toggle 即退出自动模式）
+const thinkingAutoMode = ref(false)
 
 // Workflow 流式正文：生成草稿时按 workflowId 累积 delta
 const workflowStreamingContent = ref<Record<string, string>>({})
@@ -898,6 +907,12 @@ function applyWorkflowContentDelta(event: WorkflowContentDeltaEvent) {
   }
 }
 
+/** V3.10：手动切换思考面板——用户干预后本次流式自动模式退出（不再自动展开/收起） */
+function onToggleThinkingSteps() {
+  thinkingAutoMode.value = false
+  thinkingStepsExpanded.value = !thinkingStepsExpanded.value
+}
+
 /** V2.3：Agent 思考步骤实时累计到当前 AI 消息（按 stepNo upsert，RUNNING → SUCCESS/FAILED 更新状态） */
 function applyAgentStepEvent(event: AgentStepEvent, messageIndex: number) {
   const current = messages.value[messageIndex]
@@ -910,6 +925,8 @@ function applyAgentStepEvent(event: AgentStepEvent, messageIndex: number) {
     actionType: event.actionType,
     status: event.status,
     message: event.message,
+    // V3.10：思考摘要透传（与后端事件同源，空则行文本回退 message）
+    thoughtSummary: event.thoughtSummary ?? null,
   }
   if (idx >= 0) steps[idx] = step
   else steps.push(step)
@@ -951,6 +968,7 @@ async function hydrateThinkingSteps() {
             actionType: s.actionType,
             status: s.status as AgentStepView['status'],
             message: s.message ?? s.summary ?? s.actionType,
+            thoughtSummary: s.thoughtSummary ?? null,
           }))
           .sort((a, b) => a.stepNo - b.stepNo),
       }
@@ -1393,10 +1411,13 @@ async function hydrateSuggestionMessages() {
 // V3.1：写动作卡按内层 actionType 渲染——不能按 done 判断（ADD 的 done 恒 false，会错显成「取消任务完成状态」）
 // V3.3：重命名任务（UPDATE_LEARNING_TASK）——done 也恒 false，同样不能靠 done 判断
 // V3.4：改文章标题（UPDATE_ARTICLE_TITLE）——文章域动作，done 恒 false、taskTitle 为 null
+// V3.7：隐藏/公开文章（HIDE_ARTICLE / PUBLISH_ARTICLE）——方向即动作，无 newTitle
 function writeActionTypeLabel(w: AgentWriteProposal): string {
   if (w.actionType === 'ADD_LEARNING_TASK') return '追加学习任务'
   if (w.actionType === 'UPDATE_LEARNING_TASK') return '重命名学习任务'
   if (w.actionType === 'UPDATE_ARTICLE_TITLE') return '修改文章标题'
+  if (w.actionType === 'HIDE_ARTICLE') return '隐藏文章'
+  if (w.actionType === 'PUBLISH_ARTICLE') return '公开文章'
   return w.done ? '勾选任务为完成' : '取消任务完成状态'
 }
 function writeActionReason(w: AgentWriteProposal): string {
@@ -1413,6 +1434,14 @@ function writeActionReason(w: AgentWriteProposal): string {
   if (w.actionType === 'UPDATE_ARTICLE_TITLE') {
     // V3.4：显式展示 旧标题 → 新标题（articleTitle = 提案时刻 DB 权威旧标题，兜底旧数据不崩）
     return `将文章《${w.articleTitle ?? '—'}》标题改为《${w.newTitle ?? '—'}》`
+  }
+  if (w.actionType === 'HIDE_ARTICLE') {
+    // V3.7：文章《X》将被隐藏（articleTitle 兜底旧数据不崩）
+    return `将文章《${w.articleTitle ?? '—'}》设为隐藏，其他访客将无法看到`
+  }
+  if (w.actionType === 'PUBLISH_ARTICLE') {
+    // V3.7：文章《X》将被公开
+    return `将文章《${w.articleTitle ?? '—'}》公开，恢复为所有人可见`
   }
   return `任务「${w.taskTitle}」` + (w.stageTitle ? `（阶段：${w.stageTitle}）` : '')
 }
@@ -1648,7 +1677,8 @@ async function toggle() {
       guestUsedCount.value = loadGuestUsedCount()
     } else {
       await loadSessions()
-      if (sortedSessions.value.length > 0) {
+      // 刚点过"创建会话"（pendingNewSession）→ 保持欢迎页；否则自动接回最近会话
+      if (!pendingNewSession && sortedSessions.value.length > 0) {
         switchSession(sortedSessions.value[0].id)
       }
     }
@@ -1675,6 +1705,7 @@ function closeHistory() {
 }
 
 async function switchSession(sid: string) {
+  pendingNewSession = false
   currentSessionId.value = sid
   viewingHistory.value = false
   resetCompressionHint()
@@ -1685,6 +1716,13 @@ async function switchSession(sid: string) {
   await restoreActiveWorkflow(session)
 }
 
+/**
+ * 用户显式点了"创建会话"后到下次发送/切换会话前，面板收起再打开保持欢迎页，
+ * 不被 toggle 的"自动恢复最近会话"拉回旧会话（V3.8 实测 2026-09-07：
+ * 创建会话 → 收面板 → 再打开 → 被拉回最近会话，用户以为的新会话实际是旧的）。
+ */
+let pendingNewSession = false
+
 /** 创建新会话：游客清空临时消息，登录用户重置为欢迎页 */
 function createSession() {
   if (isGuest.value) {
@@ -1694,6 +1732,7 @@ function createSession() {
     activeWorkflow.value = null
     return
   }
+  pendingNewSession = true
   currentSessionId.value = null
   messages.value = []
   activeWorkflow.value = null
@@ -1893,6 +1932,10 @@ async function send(text?: string, skipUserMessage = false) {
   const aiPlaceholderIndex = messages.value.length
   messages.value.push(aiPlaceholder)
 
+  // V3.10：新一轮流式开启自动模式——若出现 Agent 思考步骤则自动展开，
+  // 正文开始输出后自动收起（见 onAgentStep / onData）
+  thinkingAutoMode.value = true
+
   // 旧的未完成请求先取消
   if (abortController) abortController.abort()
   abortController = new AbortController()
@@ -1914,6 +1957,12 @@ async function send(text?: string, skipUserMessage = false) {
         if (idx >= 0) messages.value[idx] = userMessage
       },
       async onData(chunk) {
+        // V3.10：正文开始输出 → 自动收起思考面板（本次流式后用户可手动再展开）；
+        // 仅首个 chunk 生效（关闭自动模式后不再重复操作）
+        if (thinkingAutoMode.value) {
+          thinkingStepsExpanded.value = false
+          thinkingAutoMode.value = false
+        }
         // 逐 chunk 追加到 AI 气泡
         const currentAiMessage = messages.value[aiPlaceholderIndex]
         if (currentAiMessage) {
@@ -1935,6 +1984,8 @@ async function send(text?: string, skipUserMessage = false) {
       },
       async onAgentStep(event) {
         applyAgentStepEvent(event, aiPlaceholderIndex)
+        // V3.10：思考期间自动展开面板（用户未手动干预时）
+        if (thinkingAutoMode.value) thinkingStepsExpanded.value = true
         await scrollToBottom()
       },
       async onStop(session, assistantMessage, navigate, editorAction, articleAction, references, workflow, workflowSuggestion, writeAction) {
@@ -1985,6 +2036,7 @@ async function send(text?: string, skipUserMessage = false) {
           saveGuestUsedCount(newCount)
           guestUsedCount.value = newCount
         } else {
+          pendingNewSession = false
           currentSessionId.value = session.id
           const existing = sessions.value.findIndex((s) => s.id === session.id)
           if (existing >= 0) {
@@ -2493,7 +2545,7 @@ watch(visible, async (v) => {
                   <button
                     class="ai-thinking__toggle"
                     type="button"
-                    @click="thinkingStepsExpanded = !thinkingStepsExpanded"
+                    @click="onToggleThinkingSteps()"
                   >
                     <span class="ai-thinking__icon">🤔</span>
                     <span class="ai-thinking__title">
@@ -2514,7 +2566,8 @@ watch(visible, async (v) => {
                       >
                         {{ step.status === 'RUNNING' ? '⏳' : step.status === 'SUCCESS' ? '✓' : '✗' }}
                       </span>
-                      <span class="ai-thinking__step-message">{{ step.message }}</span>
+                      <!-- V3.10：行文本优先思考摘要（trim 防空串），空则回退模板文案 -->
+                      <span class="ai-thinking__step-message">{{ step.thoughtSummary?.trim() || step.message }}</span>
                     </div>
                   </div>
                 </div>

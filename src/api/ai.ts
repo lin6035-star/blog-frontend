@@ -102,9 +102,10 @@ export interface AgentWriteProposal {
    * UPDATE_TASK_DONE=勾选/取消勾选学习任务（done 生效）；
    * ADD_LEARNING_TASK=追加学习任务（done 忽略）；
    * UPDATE_LEARNING_TASK=重命名学习任务（taskTitle=旧名 + newTitle=新名，done 忽略）；
-   * UPDATE_ARTICLE_TITLE=改自己文章标题（V3.4，articleId/articleTitle 为文章域锚，taskTitle/planRef/stageTitle 为 null，done 恒 false）
+   * UPDATE_ARTICLE_TITLE=改自己文章标题（V3.4，articleId/articleTitle 为文章域锚，taskTitle/planRef/stageTitle 为 null，done 恒 false）；
+   * HIDE_ARTICLE / PUBLISH_ARTICLE=隐藏/公开自己文章（V3.7，前置状态由动作推导，articleId + articleTitle 展示用）
    */
-  actionType: 'UPDATE_TASK_DONE' | 'ADD_LEARNING_TASK' | 'UPDATE_LEARNING_TASK' | 'UPDATE_ARTICLE_TITLE'
+  actionType: 'UPDATE_TASK_DONE' | 'ADD_LEARNING_TASK' | 'UPDATE_LEARNING_TASK' | 'UPDATE_ARTICLE_TITLE' | 'HIDE_ARTICLE' | 'PUBLISH_ARTICLE'
   planRef?: string
   stageTitle?: string
   taskTitle?: string
@@ -115,12 +116,14 @@ export interface AgentWriteProposal {
   articleTitle?: string
 }
 
-/** Agent 思考步骤（V2.3）：status = RUNNING / SUCCESS / FAILED */
+/** Agent 思考步骤（V2.3 / V3.10）：status = RUNNING / SUCCESS / FAILED */
 export interface AgentStepView {
   stepNo: number
   actionType: string
   status: 'RUNNING' | 'SUCCESS' | 'FAILED'
   message: string
+  /** V3.10：思考摘要（可空，行文本优先于 message） */
+  thoughtSummary?: string | null
 }
 
 /** V2.2 后端 AgentStepVO 结构（历史恢复时映射为 AgentStepView） */
@@ -130,6 +133,8 @@ export interface AgentStepHistoryItem {
   status: string
   /** 展示文案（与实时 AGENT_STEP 事件一致，刷新前后不串味） */
   message?: string | null
+  /** V3.10：思考摘要（与实时 AGENT_STEP 事件一致，可空） */
+  thoughtSummary?: string | null
   summary?: string | null
   errorMessage?: string | null
   durationMs?: number | null
@@ -431,12 +436,14 @@ export interface StreamCallbacks {
 // Workflow 流式事件
 // ============================================================
 
-/** Agent 思考步骤事件（V2.3，SSE 实时推送） */
+/** Agent 思考步骤事件（V2.3，SSE 实时推送；V3.10 加 thoughtSummary） */
 export interface AgentStepEvent {
   stepNo: number
   actionType: string
   status: 'RUNNING' | 'SUCCESS' | 'FAILED'
   message: string
+  /** V3.10：思考摘要（清洗后，可空——行文本优先于 message，防空串用 trim 兜底） */
+  thoughtSummary?: string | null
 }
 
 export interface WorkflowStepEvent {
