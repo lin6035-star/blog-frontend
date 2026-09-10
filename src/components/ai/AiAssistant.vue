@@ -113,6 +113,12 @@ function buildPageContext(): PageContext {
     const t = document.title.replace(/\s*-\s*海林Blog$/, '')
     if (t && t !== '文章详情') pageContext.articleTitle = t
   }
+  // 编辑已有文章的页面也带 articleId（此前只有详情页带，导致「这篇文章怎么样」没有指代对象，
+  // 直接被 Planner CTA 拦住）。后端按 pageType 区分措辞：编辑器里可能有未保存修改，
+  // AI 读到的是已保存版本，这一点必须对用户讲清楚。
+  if (name === 'editor-edit') {
+    pageContext.articleId = String(route.params.id ?? '')
+  }
   if (name === 'public-profile') {
     pageContext.userId = String(route.params.id ?? '')
   }
