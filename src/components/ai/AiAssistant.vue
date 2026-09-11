@@ -37,6 +37,7 @@ import type {
   WorkflowStreamResult,
   AgentStepView,
   AgentStepEvent,
+  AgentPlanEvent,
   AgentStepHistoryItem,
   AgentWriteProposal,
   WorkflowType,
@@ -935,7 +936,21 @@ function applyAgentStepEvent(event: AgentStepEvent, messageIndex: number) {
   messages.value[messageIndex] = { ...current, thinkingSteps: steps }
 }
 
-/** V2.3：历史消息按 agentRunId 补拉思考步骤（刷新/切会话恢复思考面板） */
+/**
+ * V3.13：计划事件按**占位消息索引**归并。
+ *
+ * 本事件早于 STOP——那时最终消息尚未落库，占位消息还没有 agentRunId，
+ * 按 agentRunId 匹配会把实时计划直接丢掉（症状：刷新后才看得到计划）。
+ */
+function applyAgentPlanEvent(event: AgentPlanEvent, messageIndex: number) {
+  const current = messages.value[messageIndex]
+  if (!current || current.role !== 'ai') return
+  const plan = (event.plan ?? []).filter((item) => typeof item === 'string' && item.trim())
+  if (!plan.length) return
+  messages.value[messageIndex] = { ...current, plan }
+}
+
+/** V2.3：历史消息按 agentRunId 补拉思考步骤与计划（刷新/切会话恢复思考面板） */
 async function hydrateThinkingSteps() {
   // 注意：不排除有 workflow 的消息——confirm 后思考步骤与 Workflow 卡共存
   const ids = Array.from(
@@ -945,33 +960,42 @@ async function hydrateThinkingSteps() {
           (msg) =>
             msg.role === 'ai' &&
             msg.agentRunId &&
-            !msg.thinkingSteps,
+            (!msg.thinkingSteps || !msg.plan),
         )
         .map((msg) => msg.agentRunId as string),
     ),
   )
   if (!ids.length) return
 
-  const results = await Promise.allSettled(ids.map((id) => aiApi.getAgentRunSteps(id)))
+  // V3.13：steps（step 级）与 plan（run 级）分开拉，互不阻塞——
+  // 计划恢复失败不能让 steps 被视为不存在，steps 恢复失败也不能覆盖已恢复的 plan
+  const stepResults = await Promise.allSettled(ids.map((id) => aiApi.getAgentRunSteps(id)))
+  const detailResults = await Promise.allSettled(ids.map((id) => aiApi.getAgentRunDetail(id)))
   ids.forEach((id, i) => {
-    const steps = results[i].status === 'fulfilled' ? results[i].value?.data : null
-    if (!steps?.length) return
+    const steps = stepResults[i].status === 'fulfilled' ? stepResults[i].value?.data : null
+    const plan = detailResults[i].status === 'fulfilled'
+      ? detailResults[i].value?.data?.plan
+      : null
+    if (!steps?.length && !plan?.length) return
     const idx = messages.value.findIndex(
-      (msg) => msg.agentRunId === id && !msg.thinkingSteps,
+      (msg) => msg.agentRunId === id && (!msg.thinkingSteps || !msg.plan),
     )
-    if (idx >= 0) {
-      messages.value[idx] = {
-        ...messages.value[idx],
-        thinkingSteps: steps
-          .map((s: AgentStepHistoryItem) => ({
-            stepNo: s.stepNo,
-            actionType: s.actionType,
-            status: s.status as AgentStepView['status'],
-            message: s.message ?? s.summary ?? s.actionType,
-            thoughtSummary: s.thoughtSummary ?? null,
-          }))
-          .sort((a, b) => a.stepNo - b.stepNo),
-      }
+    if (idx < 0) return
+    const prev = messages.value[idx]
+    messages.value[idx] = {
+      ...prev,
+      thinkingSteps: prev.thinkingSteps ?? (steps?.length
+        ? steps
+            .map((s: AgentStepHistoryItem) => ({
+              stepNo: s.stepNo,
+              actionType: s.actionType,
+              status: s.status as AgentStepView['status'],
+              message: s.message ?? s.summary ?? s.actionType,
+              thoughtSummary: s.thoughtSummary ?? null,
+            }))
+            .sort((a, b) => a.stepNo - b.stepNo)
+        : undefined),
+      plan: prev.plan ?? (plan?.length ? plan : undefined),
     }
   })
 }
@@ -1982,6 +2006,10 @@ async function send(text?: string, skipUserMessage = false) {
         applyWorkflowContentDelta(event)
         await scrollToBottom()
       },
+      async onAgentPlan(event) {
+        // V3.13：计划恒在首个 AGENT_STEP 之前到达，同样按占位消息索引归并
+        applyAgentPlanEvent(event, aiPlaceholderIndex)
+      },
       async onAgentStep(event) {
         applyAgentStepEvent(event, aiPlaceholderIndex)
         // V3.10：思考期间自动展开面板（用户未手动干预时）
@@ -2020,7 +2048,10 @@ async function send(text?: string, skipUserMessage = false) {
         if (idx >= 0) {
           messages.value[idx] = {
             ...assistantMessage,
+            // 保留实时累计的思考步骤（V2.3）与计划（V3.13）——
+            // 否则实时计划只显示到正文落库前，刷新前后会不一致
             thinkingSteps: messages.value[idx].thinkingSteps,
+            plan: messages.value[idx].plan,
           }
         }
 
@@ -2537,9 +2568,9 @@ watch(visible, async (v) => {
                   <span v-if="isMessageStreaming(i, msg.role)" class="ai-typing-dots"><i class="dot" /><i class="dot" /><i class="dot" /></span>
                 </div>
 
-                <!-- Agent 思考过程（V2.3）：折叠条 + 步骤列表，实时推流 -->
+                <!-- Agent 思考过程（V2.3 + V3.13 计划）：折叠条 + 计划块 + 步骤列表，实时推流 -->
                 <div
-                  v-if="msg.role === 'ai' && msg.thinkingSteps?.length"
+                  v-if="msg.role === 'ai' && (msg.thinkingSteps?.length || msg.plan?.length)"
                   class="ai-thinking"
                 >
                   <button
@@ -2549,11 +2580,22 @@ watch(visible, async (v) => {
                   >
                     <span class="ai-thinking__icon">🤔</span>
                     <span class="ai-thinking__title">
-                      思考过程（{{ msg.thinkingSteps.length }} 步）
+                      思考过程<template v-if="msg.thinkingSteps?.length">（{{ msg.thinkingSteps.length }} 步）</template>
                     </span>
                     <span class="ai-thinking__arrow">{{ thinkingStepsExpanded ? '▾' : '▸' }}</span>
                   </button>
                   <div v-if="thinkingStepsExpanded" class="ai-thinking__list">
+                    <!-- V3.13：计划块（run 级）——排在步骤列表之前，用户先看到"我打算做什么" -->
+                    <div v-if="msg.plan?.length" class="ai-thinking__plan">
+                      <div class="ai-thinking__plan-title">我的计划</div>
+                      <div
+                        v-for="(item, planIndex) in msg.plan"
+                        :key="`plan-${planIndex}`"
+                        class="ai-thinking__plan-item"
+                      >
+                        <span class="ai-thinking__plan-no">{{ planIndex + 1 }}.</span>{{ item }}
+                      </div>
+                    </div>
                     <div
                       v-for="step in msg.thinkingSteps"
                       :key="step.stepNo"
@@ -4702,6 +4744,31 @@ watch(visible, async (v) => {
   flex-direction: column;
   border-top: 1px solid #f0f0f0;
   padding: 4px 0;
+}
+
+/* V3.13：计划块（run 级）——排在步骤列表之前，与步骤列表用虚线分隔 */
+.ai-thinking__plan {
+  padding: 6px 12px 8px;
+  border-bottom: 1px dashed #e5e7eb;
+}
+
+.ai-thinking__plan-title {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-bottom: 4px;
+}
+
+.ai-thinking__plan-item {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #374151;
+  word-break: break-all;
+}
+
+.ai-thinking__plan-no {
+  color: #9ca3af;
+  margin-right: 4px;
+  font-variant-numeric: tabular-nums;
 }
 
 .ai-thinking__step {

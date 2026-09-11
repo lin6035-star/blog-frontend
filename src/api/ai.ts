@@ -83,6 +83,8 @@ export interface AiMessage {
   agentRunId?: string
   /** V2.3：Agent 思考步骤（实时 AGENT_STEP 事件累计 / 历史补拉挂回） */
   thinkingSteps?: AgentStepView[]
+  /** V3.13：Plan Preview 计划（实时 AGENT_PLAN 事件归并 / run 详情补拉挂回，run 级） */
+  plan?: string[]
   /** V2.1：Agent 待确认的 Workflow 建议（STOP event 透出 / 历史补拉挂回） */
   workflowSuggestion?: WorkflowSuggestion
   /** V2.4：Agent 待确认的写动作提案（STOP event 透出 / 历史补拉挂回） */
@@ -139,6 +141,17 @@ export interface AgentStepHistoryItem {
   errorMessage?: string | null
   durationMs?: number | null
   createdAt?: string
+}
+
+/** V3.13：后端 AgentRunDetailVO（run 级；plan 仅文章域可能非空） */
+export interface AgentRunDetail {
+  id: string
+  sessionId?: string | null
+  goal?: string | null
+  status?: string | null
+  finalAnswer?: string | null
+  /** V3.13：Plan Preview 计划（可空） */
+  plan?: string[] | null
 }
 
 /** Agent 建议的 Workflow（V2.1）：确认后才由后端启动，Agent 无法直接启动 */
@@ -416,6 +429,8 @@ export interface StreamCallbacks {
   onWorkflowContentDelta?: (event: WorkflowContentDeltaEvent) => Promise<void> | void
   /** V2.3：Agent 思考步骤事件（实时） */
   onAgentStep?: (event: AgentStepEvent) => Promise<void> | void
+  /** V3.13：Agent 计划事件（run 级，恒在首个 AGENT_STEP 之前到达） */
+  onAgentPlan?: (event: AgentPlanEvent) => Promise<void> | void
   onStop: (
     session: AiSession,
     assistantMessage: AiMessage,
@@ -435,6 +450,18 @@ export interface StreamCallbacks {
 // ============================================================
 // Workflow 流式事件
 // ============================================================
+
+/**
+ * Agent 计划事件（V3.13 Plan Preview，SSE 实时推送，run 级）。
+ *
+ * **本事件早于 STOP**——那时最终消息尚未落库，占位消息还没有 agentRunId，
+ * 所以前端只能按**当前流的占位消息索引**归并；按 agentRunId 匹配会把它丢掉
+ * （症状：刷新后才看得到计划，实时看不到）。
+ */
+export interface AgentPlanEvent {
+  agentRunId?: string | null
+  plan: string[]
+}
 
 /** Agent 思考步骤事件（V2.3，SSE 实时推送；V3.10 加 thoughtSummary） */
 export interface AgentStepEvent {
@@ -532,6 +559,7 @@ const EVENT_WORKFLOW_STOP = 2002
 const EVENT_WORKFLOW_ERROR = 2003
 const EVENT_WORKFLOW_CONTENT_DELTA = 2004
 const EVENT_AGENT_STEP = 3001
+const EVENT_AGENT_PLAN = 3002
 
 async function streamChat(
   sessionId: string | null,
@@ -621,6 +649,8 @@ async function streamChat(
             await callbacks.onWorkflowContentDelta?.(event.eventData as WorkflowContentDeltaEvent)
           } else if (event.eventType === EVENT_AGENT_STEP) {
             await callbacks.onAgentStep?.(event.eventData as AgentStepEvent)
+          } else if (event.eventType === EVENT_AGENT_PLAN) {
+            await callbacks.onAgentPlan?.(event.eventData as AgentPlanEvent)
           } else if (event.eventType === EVENT_STOP) {
             stopped = true
             const data = event.eventData as {
@@ -875,6 +905,16 @@ export const aiApi = {
   /** V2.2：Agent Run 步骤列表（历史消息恢复思考面板；后端 VO 字段为 summary） */
   getAgentRunSteps(agentRunId: string) {
     return request.get<AgentStepHistoryItem[]>(`/ai/agent-runs/${agentRunId}/steps`)
+  },
+
+  /**
+   * V3.13：Agent Run 详情（run 级入口，含 plan）。
+   *
+   * 刷新恢复计划必须走这里——`/steps` 是 step 级接口，不含 run 级 plan
+   * （不扩展它的形状：往步级接口塞 run 级数据是语义错位）。
+   */
+  getAgentRunDetail(agentRunId: string) {
+    return request.get<AgentRunDetail>(`/ai/agent-runs/${agentRunId}`)
   },
 
   /** 确认 Agent 建议：启动学习类 Workflow，返回 Workflow 快照（Idempotency-Key 防双击重复创建） */
