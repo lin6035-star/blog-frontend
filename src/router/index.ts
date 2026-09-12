@@ -12,6 +12,8 @@ import HotRankView from '@/views/HotRankView.vue'
 import AuthCallbackView from '@/views/AuthCallbackView.vue'
 import LearningPlansView from '@/views/LearningPlansView.vue'
 import LearningPlanDetailView from '@/views/LearningPlanDetailView.vue'
+import DevAgentRunsView from '@/views/DevAgentRunsView.vue'
+import DevAgentRunDetailView from '@/views/DevAgentRunDetailView.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const { message } = createDiscreteApi(['message'])
@@ -103,6 +105,20 @@ const router = createRouter({
       name: 'github-oauth-callback',
       component: AuthCallbackView,
       meta: { title: 'GitHub 登录' },
+    },
+    // V4 第一刀：开发者只读面板。前端只隐藏入口，真正的门禁在后端白名单
+    // （blog.ai.inspection.enabled + allowed-user-ids）——路由放行不等于有数据。
+    {
+      path: '/dev/agent-runs',
+      name: 'dev-agent-runs',
+      component: DevAgentRunsView,
+      meta: { title: 'Agent 运行记录', requiresAuth: true },
+    },
+    {
+      path: '/dev/agent-runs/:id',
+      name: 'dev-agent-run-detail',
+      component: DevAgentRunDetailView,
+      meta: { title: 'Agent 运行详情', requiresAuth: true },
     },
   ],
 })

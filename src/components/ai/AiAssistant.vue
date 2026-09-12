@@ -38,6 +38,7 @@ import type {
   AgentStepView,
   AgentStepEvent,
   AgentPlanEvent,
+  ChatStatusEvent,
   AgentStepHistoryItem,
   AgentWriteProposal,
   WorkflowType,
@@ -209,6 +210,11 @@ async function checkCompressionAfterReply(sessionId: string) {
     }
     if (!status) return
 
+    if (!status.eligible) {
+      resetCompressionHint()
+      return
+    }
+
     if (status.lastCompressedAt && status.lastCompressedAt !== baseline) {
       // 压缩已完成（无论是否抓到"压缩中"阶段）
       showCompressionDone(status.lastCompressedAt, status.coveredMessageCount)
@@ -229,6 +235,11 @@ async function syncCompressionHint(sessionId: string) {
   try {
     const status = (await aiApi.getSummaryStatus(sessionId)).data
     if (!status) {
+      resetCompressionHint()
+      return
+    }
+
+    if (!status.eligible) {
       resetCompressionHint()
       return
     }
@@ -362,6 +373,19 @@ const thinkingStepsExpanded = ref(false)
 // V3.10：思考面板自动展开/收起——思考期间（AGENT_STEP）自动展开，
 // 正文开始输出（首个 DATA chunk）自动收起，用户可手动再展开（点击 toggle 即退出自动模式）
 const thinkingAutoMode = ref(false)
+
+/*
+ * V4.5：聊天 / QA 过程状态（瞬态）。
+ *
+ * 不放进 AiMessage——消息会写 localStorage，而过程状态是瞬态的，
+ * 混进去会被"持久化"，刷新后残留一个假的「正在检索」。
+ */
+const CHAT_STATUS_DELAY_MS = 250
+const CHAT_STATUS_MIN_SHOW_MS = 300
+const currentChatStatus = ref<string | null>(null)
+let chatStatusShowTimer: ReturnType<typeof setTimeout> | null = null
+let chatStatusHideTimer: ReturnType<typeof setTimeout> | null = null
+let chatStatusShownAt = 0
 
 // Workflow 流式正文：生成草稿时按 workflowId 累积 delta
 const workflowStreamingContent = ref<Record<string, string>>({})
@@ -948,6 +972,57 @@ function applyAgentPlanEvent(event: AgentPlanEvent, messageIndex: number) {
   const plan = (event.plan ?? []).filter((item) => typeof item === 'string' && item.trim())
   if (!plan.length) return
   messages.value[messageIndex] = { ...current, plan }
+}
+
+/**
+ * V4.5：聊天 / QA 过程状态——**防抖展示**。
+ *
+ * 检索常为百毫秒级：不防抖会闪一下，比不显示更糟。所以延迟 250ms 再渲染，
+ * 若首个正文在此之前到达就直接不渲染（见 clearChatStatus）。
+ *
+ * 文案由服务端给（前端不拼），事件可能早于 PARAM 到达——但从不依赖消息 ID，
+ * 只作用于「当前正在流式的那条 AI 占位消息」（渲染处按 isMessageStreaming 判定）。
+ */
+function onChatStatusEvent(event: ChatStatusEvent) {
+  const text = (event?.message ?? '').trim()
+  if (!text) return
+
+  if (chatStatusShowTimer) clearTimeout(chatStatusShowTimer)
+  chatStatusShowTimer = setTimeout(() => {
+    chatStatusShowTimer = null
+    currentChatStatus.value = text
+    chatStatusShownAt = Date.now()
+  }, CHAT_STATUS_DELAY_MS)
+}
+
+/**
+ * V4.5：清理过程状态（首个 DATA / STOP / error / abort 都调）。
+ *
+ * 已展示的情况下保证**最小显示时长**——否则首字秒到时状态会一闪而过，比不显示更晃眼。
+ */
+function clearChatStatus() {
+  if (chatStatusShowTimer) {
+    clearTimeout(chatStatusShowTimer)
+    chatStatusShowTimer = null
+  }
+  if (!currentChatStatus.value) return
+
+  const hide = () => {
+    currentChatStatus.value = null
+    chatStatusShownAt = 0
+    if (chatStatusHideTimer) {
+      clearTimeout(chatStatusHideTimer)
+      chatStatusHideTimer = null
+    }
+  }
+
+  const elapsed = Date.now() - chatStatusShownAt
+  if (elapsed < CHAT_STATUS_MIN_SHOW_MS) {
+    if (chatStatusHideTimer) clearTimeout(chatStatusHideTimer)
+    chatStatusHideTimer = setTimeout(hide, CHAT_STATUS_MIN_SHOW_MS - elapsed)
+  } else {
+    hide()
+  }
 }
 
 /** V2.3：历史消息按 agentRunId 补拉思考步骤与计划（刷新/切会话恢复思考面板） */
@@ -1981,6 +2056,8 @@ async function send(text?: string, skipUserMessage = false) {
         if (idx >= 0) messages.value[idx] = userMessage
       },
       async onData(chunk) {
+        // V4.5：正文到达 → 清掉过程状态（含最小显示时长保护）
+        clearChatStatus()
         // V3.10：正文开始输出 → 自动收起思考面板（本次流式后用户可手动再展开）；
         // 仅首个 chunk 生效（关闭自动模式后不再重复操作）
         if (thinkingAutoMode.value) {
@@ -2009,6 +2086,10 @@ async function send(text?: string, skipUserMessage = false) {
       async onAgentPlan(event) {
         // V3.13：计划恒在首个 AGENT_STEP 之前到达，同样按占位消息索引归并
         applyAgentPlanEvent(event, aiPlaceholderIndex)
+      },
+      async onChatStatus(event) {
+        // V4.5：聊天 / QA 过程状态（可能早于 PARAM 到达——不依赖消息 ID）
+        onChatStatusEvent(event)
       },
       async onAgentStep(event) {
         applyAgentStepEvent(event, aiPlaceholderIndex)
@@ -2077,6 +2158,8 @@ async function send(text?: string, skipUserMessage = false) {
           }
         }
 
+        // V4.5：流结束 → 清掉过程状态（兜底；正常路径在首个 DATA 已清）
+        clearChatStatus()
         sending.value = false
         scrollToBottom()
         handleNavigate(navigate)
@@ -2092,6 +2175,8 @@ async function send(text?: string, skipUserMessage = false) {
         checkCompressionAfterReply(session.id)
       },
       onError(error) {
+        // V4.5：出错 → 清掉过程状态（占位气泡也要移除，不能残留「正在检索」）
+        clearChatStatus()
         abortController = null
         // 移除空 AI 占位气泡
         messages.value.pop()
@@ -2099,6 +2184,8 @@ async function send(text?: string, skipUserMessage = false) {
         sending.value = false
       },
       onAbort() {
+        // V4.5：中断 → 清掉过程状态
+        clearChatStatus()
         abortController = null
         // 保留已流式输出的内容，末尾追加停止标记
         const aiMsg = messages.value[aiPlaceholderIndex]
@@ -2339,6 +2426,8 @@ async function saveEditMemory(mem: AiMemory) {
 }
 
 function stopGeneration() {
+  // V4.5：主动停止 → 立刻清掉过程状态（不等 abort 回调）
+  clearChatStatus()
   if (abortController) {
     abortController.abort()
     abortController = null
@@ -2566,6 +2655,11 @@ watch(visible, async (v) => {
                 <div v-if="msg.role === 'ai'" class="ai-msg-bubble markdown-body">
                   <span v-html="renderMarkdown(msg.content)" />
                   <span v-if="isMessageStreaming(i, msg.role)" class="ai-typing-dots"><i class="dot" /><i class="dot" /><i class="dot" /></span>
+                  <!-- V4.5：过程状态（瞬态，仅作用于正在流式的那条消息；防抖见 onChatStatusEvent） -->
+                  <span
+                    v-if="isMessageStreaming(i, msg.role) && currentChatStatus"
+                    class="ai-chat-status"
+                  >{{ currentChatStatus }}</span>
                 </div>
 
                 <!-- Agent 思考过程（V2.3 + V3.13 计划）：折叠条 + 计划块 + 步骤列表，实时推流 -->
@@ -2606,7 +2700,7 @@ watch(visible, async (v) => {
                         class="ai-thinking__step-status"
                         :class="`ai-thinking__step-status--${step.status.toLowerCase()}`"
                       >
-                        {{ step.status === 'RUNNING' ? '⏳' : step.status === 'SUCCESS' ? '✓' : '✗' }}
+                        {{ step.status === 'RUNNING' ? '⏳' : step.status === 'SUCCESS' ? '✓' : step.status === 'SKIPPED' ? '↷' : '✗' }}
                       </span>
                       <!-- V3.10：行文本优先思考摘要（trim 防空串），空则回退模板文案 -->
                       <span class="ai-thinking__step-message">{{ step.thoughtSummary?.trim() || step.message }}</span>
@@ -2741,6 +2835,30 @@ watch(visible, async (v) => {
                           <ul class="ai-learning-plan-tasks">
                             <li v-for="(task, ti) in stage.tasks" :key="ti">
                               {{ typeof task === 'string' ? task : task.title }}
+                            </li>
+                          </ul>
+                        </div>
+                      </div>
+                      <div v-if="createCardData(msg.workflow.context).qualityCheck?.passed !== undefined" class="ai-workflow-card__quality">
+                        <span class="ai-workflow-card__label">质量检查</span>
+                        <span :class="createCardData(msg.workflow.context).qualityCheck?.passed === false ? 'ai-workflow-card__quality--bad' : 'ai-workflow-card__quality--good'">
+                          {{ createCardData(msg.workflow.context).qualityCheck?.passed === false ? '未通过' : '通过' }}
+                        </span>
+
+                        <div v-if="createCardData(msg.workflow.context).qualityCheck?.issues?.length" class="ai-workflow-card__quality-block">
+                          <div class="ai-workflow-card__quality-title">问题</div>
+                          <ul class="ai-workflow-card__quality-list">
+                            <li v-for="(item, index) in createCardData(msg.workflow.context).qualityCheck?.issues" :key="index">
+                              {{ item }}
+                            </li>
+                          </ul>
+                        </div>
+
+                        <div v-if="createCardData(msg.workflow.context).qualityCheck?.suggestions?.length" class="ai-workflow-card__quality-block">
+                          <div class="ai-workflow-card__quality-title">建议</div>
+                          <ul class="ai-workflow-card__quality-list">
+                            <li v-for="(item, index) in createCardData(msg.workflow.context).qualityCheck?.suggestions" :key="index">
+                              {{ item }}
                             </li>
                           </ul>
                         </div>
@@ -3080,6 +3198,30 @@ watch(visible, async (v) => {
                     {{ typeof task === 'string' ? task : task.title }}
                   </li>
                 </ul>
+              </div>
+              <div v-if="workflowQualityCheck?.passed !== undefined" class="ai-workflow-card__quality">
+                <span class="ai-workflow-card__label">质量检查</span>
+                <span :class="workflowQualityCheck?.passed === false ? 'ai-workflow-card__quality--bad' : 'ai-workflow-card__quality--good'">
+                  {{ workflowQualityCheck?.passed === false ? '未通过' : '通过' }}
+                </span>
+
+                <div v-if="workflowQualityCheck?.issues?.length" class="ai-workflow-card__quality-block">
+                  <div class="ai-workflow-card__quality-title">问题</div>
+                  <ul class="ai-workflow-card__quality-list">
+                    <li v-for="(item, index) in workflowQualityCheck?.issues" :key="index">
+                      {{ item }}
+                    </li>
+                  </ul>
+                </div>
+
+                <div v-if="workflowQualityCheck?.suggestions?.length" class="ai-workflow-card__quality-block">
+                  <div class="ai-workflow-card__quality-title">建议</div>
+                  <ul class="ai-workflow-card__quality-list">
+                    <li v-for="(item, index) in workflowQualityCheck?.suggestions" :key="index">
+                      {{ item }}
+                    </li>
+                  </ul>
+                </div>
               </div>
             </div>
 
@@ -4262,6 +4404,14 @@ watch(visible, async (v) => {
   40% { transform: scale(1); opacity: 1; }
 }
 
+/* V4.5：过程状态文字——跟在打字点之后，与「在忙」动效共存（补充「在忙什么」） */
+.ai-chat-status {
+  margin-left: 8px;
+  color: #9ca3af;
+  font-size: 13px;
+  vertical-align: middle;
+}
+
 /* ============================================================
    游客次数用完引导卡片
    ============================================================ */
@@ -4801,6 +4951,10 @@ watch(visible, async (v) => {
 
 .ai-thinking__step-status--failed {
   color: #dc2626;
+}
+
+.ai-thinking__step-status--skipped {
+  color: #6b7280;
 }
 
 .ai-thinking__step-message {

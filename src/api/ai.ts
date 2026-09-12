@@ -59,6 +59,7 @@ export interface AiConversationSummaryStatus {
   compressing: boolean
   lastCompressedAt: string | null
   coveredMessageCount: number
+  eligible: boolean
 }
 
 export interface AiSession {
@@ -118,11 +119,11 @@ export interface AgentWriteProposal {
   articleTitle?: string
 }
 
-/** Agent 思考步骤（V2.3 / V3.10）：status = RUNNING / SUCCESS / FAILED */
+/** Agent 思考步骤（V2.3 / V3.10）：status = RUNNING / SUCCESS / FAILED / SKIPPED */
 export interface AgentStepView {
   stepNo: number
   actionType: string
-  status: 'RUNNING' | 'SUCCESS' | 'FAILED'
+  status: 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SKIPPED'
   message: string
   /** V3.10：思考摘要（可空，行文本优先于 message） */
   thoughtSummary?: string | null
@@ -149,9 +150,48 @@ export interface AgentRunDetail {
   sessionId?: string | null
   goal?: string | null
   status?: string | null
+  currentStep?: number | null
+  usedSteps?: number | null
+  maxSteps?: number | null
   finalAnswer?: string | null
+  errorMessage?: string | null
+  createdAt?: string
+  updatedAt?: string
   /** V3.13：Plan Preview 计划（可空） */
   plan?: string[] | null
+}
+
+/** V2.2：后端 AgentRunSummaryVO（run 列表项） */
+export interface AgentRunSummaryItem {
+  id: string
+  status?: string | null
+  goal?: string | null
+  usedSteps?: number | null
+  maxSteps?: number | null
+  createdAt?: string
+  updatedAt?: string
+}
+
+/** V4 第一刀：后端 AgentStepRawVO（开发者通道，含原始 inputJson / outputJson） */
+export interface AgentStepRawItem {
+  stepNo: number
+  actionType: string
+  status: string
+  errorMessage?: string | null
+  durationMs?: number | null
+  /** 决策输入原始 JSON（用户侧接口刻意不返回） */
+  inputJson?: string | null
+  /** 动作结果原始 JSON */
+  outputJson?: string | null
+  thoughtSummary?: string | null
+  createdAt?: string
+}
+
+/** V4 第一刀：后端 AgentRunDevDetailVO（安全摘要 + 未清洗 contextJson） */
+export interface AgentRunDevDetail {
+  run: AgentRunDetail
+  /** 原始 observations 序列化（含文章正文片段等模型可见材料，未清洗） */
+  contextJson?: string | null
 }
 
 /** Agent 建议的 Workflow（V2.1）：确认后才由后端启动，Agent 无法直接启动 */
@@ -431,6 +471,8 @@ export interface StreamCallbacks {
   onAgentStep?: (event: AgentStepEvent) => Promise<void> | void
   /** V3.13：Agent 计划事件（run 级，恒在首个 AGENT_STEP 之前到达） */
   onAgentPlan?: (event: AgentPlanEvent) => Promise<void> | void
+  /** V4.5：聊天 / QA 过程状态（可能早于 PARAM 到达——按占位消息索引归并，不依赖消息 ID） */
+  onChatStatus?: (event: ChatStatusEvent) => Promise<void> | void
   onStop: (
     session: AiSession,
     assistantMessage: AiMessage,
@@ -467,10 +509,24 @@ export interface AgentPlanEvent {
 export interface AgentStepEvent {
   stepNo: number
   actionType: string
-  status: 'RUNNING' | 'SUCCESS' | 'FAILED'
+  status: 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SKIPPED'
   message: string
   /** V3.10：思考摘要（清洗后，可空——行文本优先于 message，防空串用 trim 兜底） */
   thoughtSummary?: string | null
+}
+
+/**
+ * V4.5：聊天 / QA 轻量过程状态事件（4001）。
+ *
+ * 瞬态 UI 状态，**不持久化**；可能**早于 PARAM** 到达（PARAM 要等 userMessage 落库），
+ * 所以前端按「当前流的 AI 占位消息索引」归并，不依赖任何消息 ID。
+ */
+export interface ChatStatusEvent {
+  /** 过程状态类型；起步只放 CURRENT_ARTICLE_RESOLVING / ARTICLE_SEARCHING 两个 */
+  statusType: string
+  retrievalMode: string
+  /** 可直接展示的文案（服务端给，前端只做防抖，不自己拼文案） */
+  message: string
 }
 
 export interface WorkflowStepEvent {
@@ -560,6 +616,7 @@ const EVENT_WORKFLOW_ERROR = 2003
 const EVENT_WORKFLOW_CONTENT_DELTA = 2004
 const EVENT_AGENT_STEP = 3001
 const EVENT_AGENT_PLAN = 3002
+const EVENT_CHAT_STATUS = 4001
 
 async function streamChat(
   sessionId: string | null,
@@ -651,6 +708,8 @@ async function streamChat(
             await callbacks.onAgentStep?.(event.eventData as AgentStepEvent)
           } else if (event.eventType === EVENT_AGENT_PLAN) {
             await callbacks.onAgentPlan?.(event.eventData as AgentPlanEvent)
+          } else if (event.eventType === EVENT_CHAT_STATUS) {
+            await callbacks.onChatStatus?.(event.eventData as ChatStatusEvent)
           } else if (event.eventType === EVENT_STOP) {
             stopped = true
             const data = event.eventData as {
@@ -915,6 +974,23 @@ export const aiApi = {
    */
   getAgentRunDetail(agentRunId: string) {
     return request.get<AgentRunDetail>(`/ai/agent-runs/${agentRunId}`)
+  },
+
+  /* ---- V4 第一刀：开发者只读面板（后端白名单门禁，403 即无权；只读不改状态、不触发 retry） ---- */
+
+  /** 开发者通道：run 列表（仍是自己的 run，分页） */
+  listDevAgentRuns(params?: { sessionId?: string; page?: number; pageSize?: number }) {
+    return request.get<PageData<AgentRunSummaryItem>>('/ai/dev/agent-runs', { params })
+  },
+
+  /** 开发者通道：run 详情（安全摘要 + 原始 contextJson） */
+  getDevAgentRunDetail(agentRunId: string) {
+    return request.get<AgentRunDevDetail>(`/ai/dev/agent-runs/${agentRunId}`)
+  },
+
+  /** 开发者通道：完整 step 列表（含 inputJson / outputJson 原始列） */
+  getDevAgentRunSteps(agentRunId: string) {
+    return request.get<AgentStepRawItem[]>(`/ai/dev/agent-runs/${agentRunId}/steps`)
   },
 
   /** 确认 Agent 建议：启动学习类 Workflow，返回 Workflow 快照（Idempotency-Key 防双击重复创建） */
