@@ -375,16 +375,45 @@ const thinkingStepsExpanded = ref(false)
 const thinkingAutoMode = ref(false)
 
 /*
- * V4.5：聊天 / QA 过程状态（瞬态）。
+ * V4.x：过程步骤（瞬态，累积展示）。
  *
- * 不放进 AiMessage——消息会写 localStorage，而过程状态是瞬态的，
- * 混进去会被"持久化"，刷新后残留一个假的「正在检索」。
+ * 从 V4.5 的"单条状态"升级为"步骤列表"：新步骤追加、前一步自动算完成，
+ * 渲染成 ⌛（进行中）/ ✓（已完成）——实测反馈："步骤累计，而不是新的覆盖旧的，
+ * 像是思考过程一样，有步骤，还有打勾，沙漏表示状态"。
+ *
+ * 仍然是瞬态的（不放进 AiMessage）：消息会写 localStorage，混进去刷新后会残留假步骤。
  */
 const CHAT_STATUS_DELAY_MS = 250
-const CHAT_STATUS_MIN_SHOW_MS = 300
-const currentChatStatus = ref<string | null>(null)
+const liveChatSteps = ref<string[]>([])
+
+/*
+ * V4.x：过程面板展开态（按消息索引；默认展开）。
+ * 与思考面板的全局单 ref 不同——过程链是**每条消息各自**的，共用一个开合会互相干扰。
+ */
+const processPanelCollapsed = ref<Record<number, boolean>>({})
+
+function isProcessPanelOpen(index: number) {
+  return !processPanelCollapsed.value[index]
+}
+
+function toggleProcessPanel(index: number) {
+  processPanelCollapsed.value[index] = !processPanelCollapsed.value[index]
+}
+
+/**
+ * V4.x：工作流步骤也进同一条过程链。
+ *
+ * 用户要的是"一条链看完整过程"，而不是过程状态一条、工作流卡一条各说各的（实测反馈：
+ * "思考过程怎么是和工作流卡一起出现"）。工作流卡保留——它承担内容展示与交互，
+ * 面板只负责"这一轮都做了什么"的时序。
+ */
+function pushWorkflowStepToProcess(event: WorkflowStepEvent) {
+  const text = (event?.message ?? '').trim()
+  if (!text) return
+  if (liveChatSteps.value[liveChatSteps.value.length - 1] === text) return
+  liveChatSteps.value.push(text)
+}
 let chatStatusShowTimer: ReturnType<typeof setTimeout> | null = null
-let chatStatusHideTimer: ReturnType<typeof setTimeout> | null = null
 let chatStatusShownAt = 0
 
 // Workflow 流式正文：生成草稿时按 workflowId 累积 delta
@@ -975,10 +1004,13 @@ function applyAgentPlanEvent(event: AgentPlanEvent, messageIndex: number) {
 }
 
 /**
- * V4.5：聊天 / QA 过程状态——**防抖展示**。
+ * V4.x：过程步骤——**防抖 + 累积**。
  *
- * 检索常为百毫秒级：不防抖会闪一下，比不显示更糟。所以延迟 250ms 再渲染，
+ * 防抖：检索常为百毫秒级，不防抖会闪一下，比不显示更糟。延迟 250ms 再入列，
  * 若首个正文在此之前到达就直接不渲染（见 clearChatStatus）。
+ *
+ * 累积：每条状态成为一步，前一步自动算完成（渲染时最后一条画沙漏、其余画打勾）——
+ * 用户看到的是完整过程链条，而不是"新的覆盖旧的"。
  *
  * 文案由服务端给（前端不拼），事件可能早于 PARAM 到达——但从不依赖消息 ID，
  * 只作用于「当前正在流式的那条 AI 占位消息」（渲染处按 isMessageStreaming 判定）。
@@ -990,8 +1022,11 @@ function onChatStatusEvent(event: ChatStatusEvent) {
   if (chatStatusShowTimer) clearTimeout(chatStatusShowTimer)
   chatStatusShowTimer = setTimeout(() => {
     chatStatusShowTimer = null
-    currentChatStatus.value = text
-    chatStatusShownAt = Date.now()
+    // 同一条消息里重复文案不重复入列（服务端重发/重试时不刷屏）
+    if (liveChatSteps.value[liveChatSteps.value.length - 1] !== text) {
+      liveChatSteps.value.push(text)
+    }
+    if (!chatStatusShownAt) chatStatusShownAt = Date.now()
   }, CHAT_STATUS_DELAY_MS)
 }
 
@@ -1005,24 +1040,9 @@ function clearChatStatus() {
     clearTimeout(chatStatusShowTimer)
     chatStatusShowTimer = null
   }
-  if (!currentChatStatus.value) return
-
-  const hide = () => {
-    currentChatStatus.value = null
-    chatStatusShownAt = 0
-    if (chatStatusHideTimer) {
-      clearTimeout(chatStatusHideTimer)
-      chatStatusHideTimer = null
-    }
-  }
-
-  const elapsed = Date.now() - chatStatusShownAt
-  if (elapsed < CHAT_STATUS_MIN_SHOW_MS) {
-    if (chatStatusHideTimer) clearTimeout(chatStatusHideTimer)
-    chatStatusHideTimer = setTimeout(hide, CHAT_STATUS_MIN_SHOW_MS - elapsed)
-  } else {
-    hide()
-  }
+  // V4.x：不再清空步骤——流式结束后由 flushProcessStepsToMessage 落进消息（可展开回看）。
+  // 这里只取消「还没显示出来的」防抖计时器：首字秒到时不该再冒出步骤（防抖语义保留）。
+  chatStatusShownAt = 0
 }
 
 /** V2.3：历史消息按 agentRunId 补拉思考步骤与计划（刷新/切会话恢复思考面板） */
@@ -2077,6 +2097,7 @@ async function send(text?: string, skipUserMessage = false) {
       async onWorkflowStep(event) {
         applyWorkflowStepEvent(event)
         applyInitialWorkflowStepCard(event, aiPlaceholderIndex)
+        pushWorkflowStepToProcess(event)
         await scrollToBottom()
       },
       async onWorkflowContentDelta(event) {
@@ -2133,7 +2154,14 @@ async function send(text?: string, skipUserMessage = false) {
             // 否则实时计划只显示到正文落库前，刷新前后会不一致
             thinkingSteps: messages.value[idx].thinkingSteps,
             plan: messages.value[idx].plan,
+            // V4.x：过程步骤同理——流式期间累积在 liveChatSteps（事件可能早于消息创建，挂不上消息），
+            // 这里落到消息上，完成后仍可展开回看
+            processSteps: [
+              ...(messages.value[idx].processSteps ?? []),
+              ...liveChatSteps.value,
+            ],
           }
+          liveChatSteps.value = []
         }
 
         // 持久化 references 到 localStorage，防止刷新丢失（后端未存 references）
@@ -2655,11 +2683,45 @@ watch(visible, async (v) => {
                 <div v-if="msg.role === 'ai'" class="ai-msg-bubble markdown-body">
                   <span v-html="renderMarkdown(msg.content)" />
                   <span v-if="isMessageStreaming(i, msg.role)" class="ai-typing-dots"><i class="dot" /><i class="dot" /><i class="dot" /></span>
-                  <!-- V4.5：过程状态（瞬态，仅作用于正在流式的那条消息；防抖见 onChatStatusEvent） -->
-                  <span
-                    v-if="isMessageStreaming(i, msg.role) && currentChatStatus"
-                    class="ai-chat-status"
-                  >{{ currentChatStatus }}</span>
+                </div>
+
+                <!-- V4.x：过程面板——过程状态 + 工作流步骤合并成一条链，完成后保留可展开回看
+                     （历史部分来自 msg.processSteps，流式部分来自 liveChatSteps，同一列表续着显示） -->
+                <div
+                  v-if="msg.role === 'ai' && (msg.processSteps?.length || (isMessageStreaming(i, msg.role) && liveChatSteps.length))"
+                  class="ai-process"
+                >
+                  <button
+                    class="ai-process__toggle"
+                    type="button"
+                    @click="toggleProcessPanel(i)"
+                  >
+                    <span class="ai-process__icon">🧭</span>
+                    <span class="ai-process__title">
+                      过程（{{ (msg.processSteps?.length ?? 0) + (isMessageStreaming(i, msg.role) ? liveChatSteps.length : 0) }} 步）
+                    </span>
+                    <span class="ai-process__arrow">{{ isProcessPanelOpen(i) ? '▾' : '▸' }}</span>
+                  </button>
+                  <div v-show="isProcessPanelOpen(i)" class="ai-process__list">
+                    <div
+                      v-for="(step, doneIdx) in msg.processSteps ?? []"
+                      :key="`done-${doneIdx}`"
+                      class="ai-process__item"
+                    >
+                      <span class="ai-process__status">✓</span>
+                      <span class="ai-process__text">{{ step }}</span>
+                    </div>
+                    <div
+                      v-for="(step, liveIdx) in (isMessageStreaming(i, msg.role) ? liveChatSteps : [])"
+                      :key="`live-${liveIdx}`"
+                      class="ai-process__item"
+                    >
+                      <span class="ai-process__status">
+                        {{ liveIdx === liveChatSteps.length - 1 ? '⌛' : '✓' }}
+                      </span>
+                      <span class="ai-process__text">{{ step }}</span>
+                    </div>
+                  </div>
                 </div>
 
                 <!-- Agent 思考过程（V2.3 + V3.13 计划）：折叠条 + 计划块 + 步骤列表，实时推流 -->
@@ -4405,11 +4467,74 @@ watch(visible, async (v) => {
 }
 
 /* V4.5：过程状态文字——跟在打字点之后，与「在忙」动效共存（补充「在忙什么」） */
-.ai-chat-status {
-  margin-left: 8px;
-  color: #9ca3af;
+/*
+ * V4.x：过程面板——过程状态 + 工作流步骤合并成一条链，可折叠回看。
+ * 视觉对齐思考面板（.ai-thinking）：同族的边框 + 底色 + 圆角 + 折叠条。
+ * 替代原来"跟在打字点后面的一行浅灰小字"（实测反馈："前端根本看不到他在干嘛"）。
+ */
+.ai-process {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fafafa;
+  overflow: hidden;
+}
+
+.ai-process__toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.ai-process__toggle:hover {
+  background: #f3f4f6;
+}
+
+.ai-process__icon {
   font-size: 13px;
-  vertical-align: middle;
+}
+
+.ai-process__title {
+  flex: 1;
+  text-align: left;
+}
+
+.ai-process__arrow {
+  font-size: 10px;
+  color: #9ca3af;
+}
+
+.ai-process__list {
+  padding: 4px 10px 8px;
+}
+
+.ai-process__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.ai-process__status {
+  flex: none;
+  width: 14px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.ai-process__text {
+  flex: 1;
 }
 
 /* ============================================================

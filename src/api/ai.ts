@@ -86,6 +86,11 @@ export interface AiMessage {
   thinkingSteps?: AgentStepView[]
   /** V3.13：Plan Preview 计划（实时 AGENT_PLAN 事件归并 / run 详情补拉挂回，run 级） */
   plan?: string[]
+  /**
+   * V4.x：过程步骤（过程状态 + 工作流步骤合并到一条链）。
+   * 流式结束后由前端从 liveChatSteps 落到消息上，供展开回看——展示"AI 这一轮都做了什么"。
+   */
+  processSteps?: string[]
   /** V2.1：Agent 待确认的 Workflow 建议（STOP event 透出 / 历史补拉挂回） */
   workflowSuggestion?: WorkflowSuggestion
   /** V2.4：Agent 待确认的写动作提案（STOP event 透出 / 历史补拉挂回） */
