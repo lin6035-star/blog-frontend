@@ -437,19 +437,6 @@ export interface AiWorkflowStepLog {
   createdAt: string
 }
 
-export interface CreateArticleWorkflowRequest {
-  conversationId?: number | null
-  requirement: string
-  pageContext?: PageContext
-}
-
-export interface OptimizeArticleWorkflowRequest {
-  conversationId?: number | null
-  articleId: number
-  instruction?: string
-  pageContext?: PageContext
-}
-
 export interface AiChatResult {
   session: AiSession
   userMessage: AiMessage
@@ -940,16 +927,6 @@ export const aiApi = {
   /** 发送消息（SSE 流式） */
   streamChat,
 
-  /** 创建文章 Workflow */
-  createArticleWorkflow(data: CreateArticleWorkflowRequest) {
-    return request.post<AiWorkflowRun>('/ai/workflows/article/create', data)
-  },
-
-  /** 创建文章优化 Workflow */
-  createArticleOptimizeWorkflow(data: OptimizeArticleWorkflowRequest) {
-    return request.post<AiWorkflowRun>('/ai/workflows/article/optimize', data)
-  },
-
   /** 查询 Workflow 运行状态 */
   getWorkflowRun(id: string) {
     return request.get<AiWorkflowRun>(`/ai/workflows/${id}`)
@@ -1028,37 +1005,6 @@ export const aiApi = {
   /** 查询 Workflow 步骤执行日志 */
   getWorkflowStepLogs(id: string) {
     return request.get<AiWorkflowStepLog[]>(`/ai/workflows/${id}/steps`)
-  },
-
-  /** 同意 Workflow 当前步骤 */
-  approveWorkflow(id: string, idempotencyKey: string) {
-    return request.post<AiWorkflowRun>(
-      `/ai/workflows/${id}/approve`,
-      undefined,
-      { headers: { 'Idempotency-Key': idempotencyKey } },
-    )
-  },
-
-  /** 拒绝 Workflow 当前步骤并反馈 */
-  rejectWorkflow(
-    id: string,
-    feedback: string,
-    idempotencyKey: string,
-  ) {
-    return request.post<AiWorkflowRun>(
-      `/ai/workflows/${id}/reject`,
-      { feedback },
-      { headers: { 'Idempotency-Key': idempotencyKey } },
-    )
-  },
-
-  /** 重试失败的 Workflow 当前步骤 */
-  retryWorkflow(id: string, idempotencyKey: string) {
-    return request.post<AiWorkflowRun>(
-      `/ai/workflows/${id}/retry`,
-      undefined,
-      { headers: { 'Idempotency-Key': idempotencyKey } },
-    )
   },
 
   /** 同意 Workflow 当前步骤（SSE） */
