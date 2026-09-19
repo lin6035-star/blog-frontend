@@ -663,17 +663,7 @@ async function streamChat(
   }
 
   if (!response.ok) {
-    let errorMsg = `请求失败 (${response.status})`
-    try {
-      const text = await response.text()
-      if (text) {
-        const parsed = JSON.parse(text)
-        errorMsg = parsed.message || errorMsg
-      }
-    } catch {
-      // 不是 JSON，用默认错误信息
-    }
-    callbacks.onError(new Error(errorMsg))
+    callbacks.onError(new Error(await resolveRejectionMessage(response)))
     return
   }
 
@@ -807,7 +797,7 @@ async function streamWorkflowAction(
   }
 
   if (!response.ok) {
-    callbacks.onError(new Error(`请求失败 (${response.status})`))
+    callbacks.onError(new Error(await resolveRejectionMessage(response)))
     return
   }
 
@@ -1139,4 +1129,28 @@ export const aiApi = {
   //   }
   //   return res as unknown as typeof res & { data: AiChatResult }
   // },
+}
+
+/**
+ * SSE 请求被拒绝（HTTP 非 2xx）时解析后端的错误体。
+ *
+ * 后端的准入拒绝 / 限流 / 额度不足都走「非 2xx + Result JSON」——
+ * 不能走项目默认的 200，因为 SSE 解析器在 200 时只认 `data:` 前缀的行，
+ * JSON 错误体会被静默忽略，用户看到的只是「连接意外中断」，完全指不到根因。
+ *
+ * 聊天流与 Workflow 流共用这一处，避免两边行为不一致
+ * （原先 Workflow 流只显示裸的 `请求失败 (429)`，后端给的「你还有任务正在处理中」看不到）。
+ */
+async function resolveRejectionMessage(response: Response): Promise<string> {
+  let errorMsg = `请求失败 (${response.status})`
+  try {
+    const text = await response.text()
+    if (text) {
+      const parsed = JSON.parse(text)
+      errorMsg = parsed.message || errorMsg
+    }
+  } catch {
+    // 不是 JSON（或空体），用状态码兜底
+  }
+  return errorMsg
 }

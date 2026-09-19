@@ -145,7 +145,79 @@ function buildPageContext(): PageContext {
 const visible = ref(false)
 const isFullscreen = ref(false)
 const viewingHistory = ref(false)
-const sending = ref(false)
+/**
+ * 会话级流式状态。
+ *
+ * 原来 `sending` / `abortController` 都是组件级单例，于是「一个流在跑、整个面板锁死」：
+ * 切到别的会话（含新建会话）后输入框仍禁用、发送键仍是暂停键 ——
+ * 而用户想做的恰恰是「在另一个会话里并行跑一个任务」。
+ *
+ * 现在按会话隔离。key 取会话 id；新会话首次发送时后端还没返回 id，用
+ * {@link PENDING_SESSION_KEY} 占位（那时 currentSessionId 为 null，
+ * 直到流结束 onStop 才会被赋上真实 id）。
+ */
+const PENDING_SESSION_KEY = '__pending__'
+
+/**
+ * 新会话的临时 key —— **每次新建会话都换一个**。
+ *
+ * 不能所有新会话共用一个固定值：第一个新会话的流还在跑时再点「新建会话」，
+ * 第二个新会话会被误判成「正在流式」，输入框照样锁住。
+ */
+let pendingKeySeq = 0
+const pendingSessionKey = ref(`${PENDING_SESSION_KEY}0`)
+
+const streamingKeys = ref<string[]>([])
+const streamControllers = new Map<string, AbortController>()
+
+function currentStreamKey(): string {
+  return currentSessionId.value ?? pendingSessionKey.value
+}
+
+/** 当前**显示的**会话是否正在流式（输入框禁用 / 发送键切换成暂停键都用它） */
+const sending = computed(() => streamingKeys.value.includes(currentStreamKey()))
+
+/**
+ * 已与 UI 脱离的流 key。
+ *
+ * 切换 / 新建会话时把当时所有活跃流标记为脱离：它们的后续事件不再更新视图
+ * （messages 已被重新加载、占位气泡索引失效），只在后台照常跑完，
+ * 内容由切回该会话时的重新拉取补上。
+ *
+ * 不能只靠「当前 key 与流 key 是否相等」判断——切走再切回来，两者又相等了。
+ */
+const detachedStreamKeys = ref<string[]>([])
+
+/** 切换 / 新建会话：当前视图不再属于任何正在跑的流 */
+function detachAllStreams() {
+  if (streamingKeys.value.length > 0) {
+    detachedStreamKeys.value = [...streamingKeys.value]
+  }
+}
+
+/** 该流是否仍应更新视图（判据见 detachedStreamKeys 的注释） */
+function streamAttached(key: string): boolean {
+  return !detachedStreamKeys.value.includes(key)
+}
+
+/** 开启一个流；同一会话内的旧请求先取消，不同会话的流互不影响 */
+function startStream(key: string): AbortController {
+  // 同一 key 的新流要重新附着（清掉上一轮留下的脱离标记）
+  detachedStreamKeys.value = detachedStreamKeys.value.filter((k) => k !== key)
+  streamControllers.get(key)?.abort()
+  const controller = new AbortController()
+  streamControllers.set(key, controller)
+  if (!streamingKeys.value.includes(key)) {
+    streamingKeys.value = [...streamingKeys.value, key]
+  }
+  return controller
+}
+
+function endStream(key: string) {
+  streamControllers.delete(key)
+  streamingKeys.value = streamingKeys.value.filter((k) => k !== key)
+}
+
 const loadingMessages = ref(false)
 const input = ref('')
 const messageListRef = ref<HTMLElement | null>(null)
@@ -265,14 +337,30 @@ async function syncCompressionHint(sessionId: string) {
 }
 
 // 用于取消正在进行的流式请求
-let abortController: AbortController | null = null
 
 // ============================================================
 // Workflow 状态
 // ============================================================
 
 const activeWorkflow = ref<AiWorkflowRun | null>(null)
-const workflowBusy = ref(false)
+
+/**
+ * 正在执行操作的 workflow id 集合。
+ *
+ * 原来是单个布尔量：在 A 会话点「同意」后切到 B 会话，B 的 workflow 按钮也会被禁用。
+ * 改成按 workflow id 记录后，`workflowBusy` 只反映**当前显示的那个** workflow ——
+ * 模板里的 `:disabled="workflowBusy"` 一处都不用改。
+ */
+const busyWorkflowIds = ref<string[]>([])
+const workflowBusy = computed(() =>
+  activeWorkflow.value ? busyWorkflowIds.value.includes(activeWorkflow.value.id) : false,
+)
+
+function markWorkflowBusy(id: string, busy: boolean) {
+  busyWorkflowIds.value = busy
+    ? [...new Set([...busyWorkflowIds.value, id])]
+    : busyWorkflowIds.value.filter((x) => x !== id)
+}
 const workflowRejectEditing = ref(false)
 const workflowFeedback = ref('')
 
@@ -425,7 +513,23 @@ const workflowStreamingOutline = ref<Record<string, string>>({})
 
 // 本地过渡态：点击按钮后立刻切换面板，解决"卡住"体感
 type LocalTransition = 'APPROVING' | 'REJECTING' | 'RETRYING' | 'CANCELLING'
-const localTransition = ref<LocalTransition | null>(null)
+
+/** 每个 workflow 各自的过渡态（理由同 workflowBusy：切会话时不能互相影响） */
+const transitionsByWorkflow = ref<Record<string, LocalTransition>>({})
+const localTransition = computed<LocalTransition | null>(() => {
+  const id = activeWorkflow.value?.id
+  return id ? (transitionsByWorkflow.value[id] ?? null) : null
+})
+
+function setLocalTransition(id: string, t: LocalTransition | null) {
+  const next = { ...transitionsByWorkflow.value }
+  if (t === null) {
+    delete next[id]
+  } else {
+    next[id] = t
+  }
+  transitionsByWorkflow.value = next
+}
 
 const isTransitioning = computed(() => localTransition.value !== null)
 
@@ -737,30 +841,41 @@ async function approveWorkflow() {
   if (!activeWorkflow.value || workflowBusy.value) return
 
   const workflowId = activeWorkflow.value.id
+  // workflow 流用独立 key（会话 key + workflowId）：既不与同会话的聊天流互相 abort，
+  // 也让「脱离」能精确到这个流
+  const streamKey = `${currentStreamKey()}:wf:${workflowId}`
+  const controller = startStream(streamKey)
+  const attached = () => streamAttached(streamKey)
   const idempotencyKey =
     getWorkflowActionKey(workflowId, 'APPROVE')
 
-  workflowBusy.value = true
-  localTransition.value = 'APPROVING'
+  markWorkflowBusy(workflowId, true)
+  setLocalTransition(workflowId, 'APPROVING')
 
   try {
     await aiApi.streamApproveWorkflow(
       workflowId,
       idempotencyKey,
       {
+        // 步骤日志与 delta 都按 workflowId 存，用户切走时继续累积反而是对的
+        // （切回来能看到完整内容），所以这两个不加守卫。
         onStep: applyWorkflowStepEvent,
 
         onContentDelta: applyWorkflowContentDelta,
 
         async onStop(data) {
-          await applyWorkflowStreamResult(data)
           clearWorkflowActionKey(workflowId, 'APPROVE')
           resetWorkflowRejectUI()
+          // 结果会写 activeWorkflow —— 用户已切走时那是**别的会话**的面板，不能碰。
+          // 只维护本地会话锚点，切回去由 restoreActiveWorkflow 重新拉取。
+          if (!attached()) {
+            if (data.workflow) clearSessionActiveWorkflow(data.workflow.id)
+            return
+          }
+          await applyWorkflowStreamResult(data)
         },
 
         async onWorkflowError(data) {
-          await applyWorkflowStreamResult(data)
-
           // 后端已经执行完成，只是业务结果为 FAILED
           if (data.workflow) {
             clearWorkflowActionKey(workflowId, 'APPROVE')
@@ -771,6 +886,9 @@ async function approveWorkflow() {
               ?? data.workflow?.errorMessage
               ?? 'Workflow 执行失败',
           )
+
+          if (!attached()) return
+          await applyWorkflowStreamResult(data)
         },
 
         onError(error) {
@@ -780,14 +898,16 @@ async function approveWorkflow() {
           )
         },
       },
+      controller.signal,
     )
   } catch (error: any) {
     message.error(
       error?.message ?? 'Workflow 同意失败',
     )
   } finally {
-    workflowBusy.value = false
-    localTransition.value = null
+    endStream(streamKey)
+    markWorkflowBusy(workflowId, false)
+    setLocalTransition(workflowId, null)
   }
 }
 
@@ -802,6 +922,9 @@ async function rejectWorkflow() {
   if (!activeWorkflow.value || workflowBusy.value) return
 
   const workflowId = activeWorkflow.value.id
+  const streamKey = `${currentStreamKey()}:wf:${workflowId}`
+  const controller = startStream(streamKey)
+  const attached = () => streamAttached(streamKey)
   const idempotencyKey =
     getWorkflowActionKey(
       workflowId,
@@ -809,8 +932,8 @@ async function rejectWorkflow() {
       feedback,
     )
 
-  workflowBusy.value = true
-  localTransition.value = 'REJECTING'
+  markWorkflowBusy(workflowId, true)
+  setLocalTransition(workflowId, 'REJECTING')
 
   try {
     await aiApi.streamRejectWorkflow(
@@ -823,14 +946,16 @@ async function rejectWorkflow() {
         onContentDelta: applyWorkflowContentDelta,
 
         async onStop(data) {
-          await applyWorkflowStreamResult(data)
           clearWorkflowActionKey(workflowId, 'REJECT')
           resetWorkflowRejectUI()
+          if (!attached()) {
+            if (data.workflow) clearSessionActiveWorkflow(data.workflow.id)
+            return
+          }
+          await applyWorkflowStreamResult(data)
         },
 
         async onWorkflowError(data) {
-          await applyWorkflowStreamResult(data)
-
           if (data.workflow) {
             clearWorkflowActionKey(workflowId, 'REJECT')
           }
@@ -840,6 +965,9 @@ async function rejectWorkflow() {
               ?? data.workflow?.errorMessage
               ?? 'Workflow 修改失败',
           )
+
+          if (!attached()) return
+          await applyWorkflowStreamResult(data)
         },
 
         onError(error) {
@@ -849,14 +977,16 @@ async function rejectWorkflow() {
           )
         },
       },
+      controller.signal,
     )
   } catch (error: any) {
     message.error(
       error?.message ?? 'Workflow 修改失败',
     )
   } finally {
-    workflowBusy.value = false
-    localTransition.value = null
+    endStream(streamKey)
+    markWorkflowBusy(workflowId, false)
+    setLocalTransition(workflowId, null)
   }
 }
 
@@ -864,11 +994,14 @@ async function retryWorkflow() {
   if (!activeWorkflow.value || workflowBusy.value) return
 
   const workflowId = activeWorkflow.value.id
+  const streamKey = `${currentStreamKey()}:wf:${workflowId}`
+  const controller = startStream(streamKey)
+  const attached = () => streamAttached(streamKey)
   const idempotencyKey =
     getWorkflowActionKey(workflowId, 'RETRY')
 
-  workflowBusy.value = true
-  localTransition.value = 'RETRYING'
+  markWorkflowBusy(workflowId, true)
+  setLocalTransition(workflowId, 'RETRYING')
 
   try {
     await aiApi.streamRetryWorkflow(
@@ -880,15 +1013,17 @@ async function retryWorkflow() {
         onContentDelta: applyWorkflowContentDelta,
 
         async onStop(data) {
-          await applyWorkflowStreamResult(data)
           clearWorkflowActionKey(workflowId, 'RETRY')
           resetWorkflowRejectUI()
           message.success('Workflow 已重试')
+          if (!attached()) {
+            if (data.workflow) clearSessionActiveWorkflow(data.workflow.id)
+            return
+          }
+          await applyWorkflowStreamResult(data)
         },
 
         async onWorkflowError(data) {
-          await applyWorkflowStreamResult(data)
-
           if (data.workflow) {
             clearWorkflowActionKey(workflowId, 'RETRY')
           }
@@ -898,6 +1033,9 @@ async function retryWorkflow() {
               ?? data.workflow?.errorMessage
               ?? 'Workflow 重试失败',
           )
+
+          if (!attached()) return
+          await applyWorkflowStreamResult(data)
         },
 
         onError(error) {
@@ -906,14 +1044,16 @@ async function retryWorkflow() {
           )
         },
       },
+      controller.signal,
     )
   } catch (error: any) {
     message.error(
       error?.message ?? 'Workflow 重试失败',
     )
   } finally {
-    workflowBusy.value = false
-    localTransition.value = null
+    endStream(streamKey)
+    markWorkflowBusy(workflowId, false)
+    setLocalTransition(workflowId, null)
   }
 }
 
@@ -922,20 +1062,24 @@ async function cancelWorkflow() {
 
   const workflowId = activeWorkflow.value.id
 
-  workflowBusy.value = true
-  localTransition.value = 'CANCELLING'
+  markWorkflowBusy(workflowId, true)
+  setLocalTransition(workflowId, 'CANCELLING')
   try {
     await aiApi.cancelWorkflow(workflowId)
     clearSessionActiveWorkflow(workflowId)
-    activeWorkflow.value = null
-    workflowRejectEditing.value = false
-    workflowFeedback.value = ''
+    // 只有面板上还是这个 workflow 时才清 —— 用户切走后 activeWorkflow
+    // 已经是别的会话的了，不能连带清掉
+    if (activeWorkflow.value?.id === workflowId) {
+      activeWorkflow.value = null
+      workflowRejectEditing.value = false
+      workflowFeedback.value = ''
+    }
     message.success('Workflow 已取消')
   } catch (error: any) {
     message.error(error?.message ?? '取消 Workflow 失败')
   } finally {
-    workflowBusy.value = false
-    localTransition.value = null
+    markWorkflowBusy(workflowId, false)
+    setLocalTransition(workflowId, null)
   }
 }
 
@@ -1782,8 +1926,18 @@ async function restoreActiveWorkflow(session?: AiSession | null) {
       return
     }
 
-    // 结束态的 workflow 不该恢复为 active（面板无对应操作区），只挂回消息卡片
-    if (res.data.status === 'COMPLETED' || res.data.status === 'CANCELLED') {
+    // 结束态的 workflow 不该恢复为 active（面板无对应操作区），只挂回消息卡片。
+    //
+    // FAILED 必须算终止态：漏了它，失败的 Workflow 会被一直挂在活动面板上
+    // （存量 bug；后端 AI 长任务准入与启动恢复都会批量产生 FAILED，会放大它）。
+    //
+    // PAUSED 暂不并入：它语义上是「可恢复」而不是终止，且后端当前没有任何写入点。
+    // 将来实现暂停/恢复时要连同它的面板操作区一起设计，不能在这里想当然地排除。
+    if (
+      res.data.status === 'COMPLETED' ||
+      res.data.status === 'CANCELLED' ||
+      res.data.status === 'FAILED'
+    ) {
       activeWorkflow.value = null
       attachWorkflowToLatestAiMessage(res.data)
       return
@@ -1870,6 +2024,7 @@ function closeHistory() {
 }
 
 async function switchSession(sid: string) {
+  detachAllStreams()
   pendingNewSession = false
   currentSessionId.value = sid
   viewingHistory.value = false
@@ -1890,6 +2045,9 @@ let pendingNewSession = false
 
 /** 创建新会话：游客清空临时消息，登录用户重置为欢迎页 */
 function createSession() {
+  detachAllStreams()
+  // 换一个新的临时 key：让这个新会话与上一个新会话的流互不干扰
+  pendingSessionKey.value = `${PENDING_SESSION_KEY}${++pendingKeySeq}`
   if (isGuest.value) {
     clearGuestData()
     messages.value = []
@@ -2084,7 +2242,13 @@ async function send(text?: string, skipUserMessage = false) {
   }
 
   await scrollToBottom(true)
-  sending.value = true
+
+  // 会话级流状态：记下本次流属于哪个会话，并开启它的 controller
+  const streamKey = currentStreamKey()
+  const controller = startStream(streamKey)
+
+  /** 流所属的会话是否仍在显示（判据见 detachedStreamKeys 的注释） */
+  const uiAttached = () => streamAttached(streamKey)
 
   // 空 AI 占位气泡（后续 onData 逐 chunk 填充）
   const aiPlaceholder: AiMessage = {
@@ -2101,16 +2265,13 @@ async function send(text?: string, skipUserMessage = false) {
   // 正文开始输出后自动收起（见 onAgentStep / onData）
   thinkingAutoMode.value = true
 
-  // 旧的未完成请求先取消
-  if (abortController) abortController.abort()
-  abortController = new AbortController()
-
   aiApi.streamChat(
     isGuest.value ? null : currentSessionId.value,
     content,
     buildPageContext(),
     {
       onParam(_session, userMessage) {
+        if (!uiAttached()) return
         // 用后端返回的正式数据替换临时用户消息
         let idx = -1
         for (let i = messages.value.length - 1; i >= 0; i--) {
@@ -2122,6 +2283,7 @@ async function send(text?: string, skipUserMessage = false) {
         if (idx >= 0) messages.value[idx] = userMessage
       },
       async onData(chunk) {
+        if (!uiAttached()) return
         // V4.5：正文到达 → 清掉过程状态（含最小显示时长保护）
         clearChatStatus()
         // V3.10：正文开始输出 → 自动收起思考面板（本次流式后用户可手动再展开）；
@@ -2141,31 +2303,53 @@ async function send(text?: string, skipUserMessage = false) {
         await scrollToBottom()
       },
       async onWorkflowStep(event) {
+        if (!uiAttached()) return
         applyWorkflowStepEvent(event)
         applyInitialWorkflowStepCard(event, aiPlaceholderIndex)
         pushWorkflowStepToProcess(event)
         await scrollToBottom()
       },
       async onWorkflowContentDelta(event) {
+        if (!uiAttached()) return
         applyWorkflowContentDelta(event)
         await scrollToBottom()
       },
       async onAgentPlan(event) {
+        if (!uiAttached()) return
         // V3.13：计划恒在首个 AGENT_STEP 之前到达，同样按占位消息索引归并
         applyAgentPlanEvent(event, aiPlaceholderIndex)
       },
       async onChatStatus(event) {
+        if (!uiAttached()) return
         // V4.5：聊天 / QA 过程状态（可能早于 PARAM 到达——不依赖消息 ID）
         onChatStatusEvent(event)
       },
       async onAgentStep(event) {
+        if (!uiAttached()) return
         applyAgentStepEvent(event, aiPlaceholderIndex)
         // V3.10：思考期间自动展开面板（用户未手动干预时）
         if (thinkingAutoMode.value) thinkingStepsExpanded.value = true
         await scrollToBottom()
       },
       async onStop(session, assistantMessage, navigate, editorAction, articleAction, references, workflow, workflowSuggestion, writeAction) {
-        abortController = null
+        endStream(streamKey)
+
+        // 用户已切走：这份 messages 已经属于别的会话，UI 一律不动
+        // （尤其不能把 currentSessionId 设成这个流所属的会话，那会把用户强行拉回去）；
+        // 但会话列表、记忆刷新、压缩检查这些副作用必须照常完成。
+        if (!uiAttached()) {
+          if (!isGuest.value) {
+            const existing = sessions.value.findIndex((s) => s.id === session.id)
+            if (existing >= 0) {
+              sessions.value[existing] = session
+            } else {
+              sessions.value.unshift(session)
+            }
+          }
+          scheduleMemoryCandidateRefresh()
+          checkCompressionAfterReply(session.id)
+          return
+        }
 
         const legacyNavigate = extractLegacyNavigate(assistantMessage.content)
         assistantMessage = {
@@ -2234,7 +2418,6 @@ async function send(text?: string, skipUserMessage = false) {
 
         // V4.5：流结束 → 清掉过程状态（兜底；正常路径在首个 DATA 已清）
         clearChatStatus()
-        sending.value = false
         scrollToBottom()
         handleNavigate(navigate)
         if (editorAction) {
@@ -2249,19 +2432,21 @@ async function send(text?: string, skipUserMessage = false) {
         checkCompressionAfterReply(session.id)
       },
       onError(error) {
+        endStream(streamKey)
+        // 失败提示与可见性无关：用户切走了也该知道有个任务失败了
+        message.error(error?.message ?? '发送失败')
+        if (!uiAttached()) return
         // V4.5：出错 → 清掉过程状态（占位气泡也要移除，不能残留「正在检索」）
         clearChatStatus()
-        abortController = null
         // 移除空 AI 占位气泡
         messages.value.pop()
-        message.error(error?.message ?? '发送失败')
-        sending.value = false
       },
       onAbort() {
+        endStream(streamKey)
+        if (!uiAttached()) return
         // V4.5：中断 → 清掉过程状态
         clearChatStatus()
-        abortController = null
-        // 保留已流式输出的内容，末尾追加停止标记
+        // 保留已流式输出的内容，末尾停止标记
         const aiMsg = messages.value[aiPlaceholderIndex]
         if (aiMsg && aiMsg.role === 'ai') {
           messages.value[aiPlaceholderIndex] = {
@@ -2269,7 +2454,6 @@ async function send(text?: string, skipUserMessage = false) {
             content: (aiMsg.content || '') + '\n\n*（已停止生成）*',
           }
         }
-        sending.value = false
         if (isGuest.value) {
           saveGuestMessages(messages.value)
           const newCount = loadGuestUsedCount() + 1
@@ -2279,7 +2463,7 @@ async function send(text?: string, skipUserMessage = false) {
         scrollToBottom()
       },
     },
-    abortController.signal,
+    controller.signal,
   )
 }
 
@@ -2500,12 +2684,12 @@ async function saveEditMemory(mem: AiMemory) {
 }
 
 function stopGeneration() {
+  // 只停**当前会话**的流——别的会话的流不该被这个按钮波及
+  const controller = streamControllers.get(currentStreamKey())
+  if (!controller) return
   // V4.5：主动停止 → 立刻清掉过程状态（不等 abort 回调）
   clearChatStatus()
-  if (abortController) {
-    abortController.abort()
-    abortController = null
-  }
+  controller.abort()
 }
 
 async function regenerate(aiMsgIndex: number) {
