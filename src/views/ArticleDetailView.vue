@@ -12,6 +12,7 @@ import {
   Expand,
   Heart,
   HeartOutline,
+  PeopleOutline,
   Star,
   StarOutline,
   ShareSocialOutline,
@@ -489,6 +490,11 @@ onBeforeUnmount(() => {
                 <span>
                   <n-icon><Eye /></n-icon>
                   {{ article.viewCount || 0 }}
+                </span>
+                <!-- 今日访客：与累计浏览量并列，必须带"今日"二字，否则会被读成累计值 -->
+                <span v-if="article.uvCount">
+                  <n-icon><PeopleOutline /></n-icon>
+                  今日访客 {{ article.uvCount }}
                 </span>
               </div>
               <div class="article-content" v-html="renderedContent" />

@@ -541,6 +541,12 @@ export interface WorkflowStepEvent {
   step?: string
   status: string
   message?: string
+  /** 仅 SUCCESS / FAILED 事件带：本步耗时（RUNNING 时还没有） */
+  durationMs?: number
+  /** 仅 SUCCESS / FAILED 事件带：本步 LLM 输入 token */
+  inputTokens?: number
+  /** 仅 SUCCESS / FAILED 事件带：本步 LLM 输出 token */
+  outputTokens?: number
 }
 
 export interface WorkflowContentDeltaEvent {

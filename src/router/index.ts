@@ -11,6 +11,8 @@ import DraftsView from '@/views/DraftsView.vue'
 import HotRankView from '@/views/HotRankView.vue'
 import AuthCallbackView from '@/views/AuthCallbackView.vue'
 import LearningPlansView from '@/views/LearningPlansView.vue'
+import WalletView from '@/views/WalletView.vue'
+import SeckillView from '@/views/SeckillView.vue'
 import LearningPlanDetailView from '@/views/LearningPlanDetailView.vue'
 import DevAgentRunsView from '@/views/DevAgentRunsView.vue'
 import DevAgentRunDetailView from '@/views/DevAgentRunDetailView.vue'
@@ -75,6 +77,20 @@ const router = createRouter({
       name: 'learning-plan-detail',
       component: LearningPlanDetailView,
       meta: { title: '学习计划详情', requiresAuth: true },
+    },
+    {
+      path: '/me/wallet',
+      name: 'wallet',
+      component: WalletView,
+      meta: { title: '我的钱包', requiresAuth: true },
+    },
+    // 后端活动列表对游客开放，但前端页面要求登录：抢购本身必须登录，
+    // 而「看得到抢不了」只会多出一次「点了才提示登录」的无效点击
+    {
+      path: '/seckill',
+      name: 'seckill',
+      component: SeckillView,
+      meta: { title: '额度秒杀', requiresAuth: true },
     },
     {
       path: '/editor',

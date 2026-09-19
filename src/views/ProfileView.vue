@@ -14,11 +14,14 @@ import {
   TrashOutline,
 } from '@vicons/ionicons5'
 import { aiApi, type AiEpisodicMemory } from '@/api/ai'
+import { authApi } from '@/api/auth'
 import { myArticleApi } from '@/api/myArticle'
 import { publicUserApi } from '@/api/publicUser'
 import { ARTICLE_STATUS, getArticleStatusLabel } from '@/constants/articleStatus'
 import { userApi } from '@/api/user'
 import AvatarPreviewModal from '@/components/common/AvatarPreviewModal.vue'
+import SiteActivityCard from '@/components/common/SiteActivityCard.vue'
+import WalletBalanceCard from '@/components/common/WalletBalanceCard.vue'
 import MainLayout from '@/layouts/MainLayout.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { Article } from '@/types/article'
@@ -80,7 +83,14 @@ function handleLogout() {
     content: '确定要退出登录吗？',
     positiveText: '退出',
     negativeText: '取消',
-    onPositiveClick: () => {
+    onPositiveClick: async () => {
+      try {
+        // 必须先通知后端把这个 token 拉黑，再清本地：顺序反了请求就带不上 token，
+        // 后端拿不到要作废的是哪一个（JWT 无状态，不通知 = 它继续有效到过期）
+        await authApi.logout()
+      } catch {
+        // 后端不可用时不能把用户卡在登录态：本地状态照清
+      }
       authStore.clearAuth()
       message.success('已退出登录')
       router.push('/')
@@ -489,6 +499,11 @@ onMounted(() => {
             <span>加入于</span>
             <strong>{{ joinedAtText }}</strong>
           </div>
+          <!-- 站点活跃（Bitmap 统计）。放在"我的学习计划"入口之前，
+               让那个导航入口保持贴在卡片底部 -->
+          <SiteActivityCard />
+          <!-- 钱包额度（整卡即进入钱包页的入口，不再另加一条导航链接） -->
+          <WalletBalanceCard />
           <router-link class="profile-learning-plans-entry" to="/me/learning-plans">
             我的学习计划
           </router-link>

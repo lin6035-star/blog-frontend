@@ -48,6 +48,8 @@ import { emitAiArticleAction } from '@/utils/aiArticleActionBus'
 import { renderMarkdown } from '@/utils/markdown'
 
 import { useAuthStore } from '@/stores/auth'
+import { walletApi } from '@/api/wallet'
+import type { WalletInfo } from '@/types/wallet'
 
 // ============================================================
 // Auth & guest
@@ -1111,6 +1113,11 @@ function applyWorkflowStepEvent(event: WorkflowStepEvent) {
     step: event.step ?? event.action ?? 'WORKFLOW',
     status: event.status || 'RUNNING',
     inputSummary: event.message ?? 'Workflow 正在执行...',
+    // 后端在 SUCCESS / FAILED 事件里带了结构化元数据，实时即可显示耗时与 token
+    // （RUNNING 事件不带，保持 undefined，前端显示 `—`）
+    durationMs: event.durationMs,
+    inputTokens: event.inputTokens,
+    outputTokens: event.outputTokens,
     startedAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
   }
@@ -1192,10 +1199,16 @@ async function applyWorkflowStreamResult(data: WorkflowStreamResult) {
   delete workflowStreamingOutline.value[data.workflow.id]
 
   if (data.stepLogs) {
-    // 保留实时日志（stream- 前缀），拼接数据库 StepLog，避免 STOP 时把执行中的步骤覆盖掉
     const workflowId = data.workflow.id
-    const liveLogs = (workflowStepLogs.value[workflowId] ?? []).filter((log) =>
-      log.id.startsWith(`stream-${workflowId}-`),
+    // 数据库里已有记录的步骤（step#status）——实时版本字段不全，丢弃以免同一步骤显示两条
+    const persistedKeys = new Set(
+      data.stepLogs.map((log) => `${log.step}#${log.status}`),
+    )
+    // 只保留数据库里没有对应记录的实时日志（如 create 阶段 run 未入库、不落库的步骤）
+    const liveLogs = (workflowStepLogs.value[workflowId] ?? []).filter(
+      (log) =>
+        log.id.startsWith(`stream-${workflowId}-`) &&
+        !persistedKeys.has(`${log.step}#${log.status}`),
     )
 
     workflowStepLogs.value[workflowId] = [
@@ -1787,6 +1800,37 @@ async function restoreActiveWorkflow(session?: AiSession | null) {
   }
 }
 
+/**
+ * 钱包余额（登录用户才拉）。
+ *
+ * 余额允许为负，但**负余额有两种含义**，只看数字会把「预扣进行中」误报成欠费：
+ * 用户刚发出一条消息就看到负余额，会以为已经欠款，而实际上结算后会退回来。
+ */
+const wallet = ref<WalletInfo | null>(null)
+
+const walletTone = computed(() => {
+  const info = wallet.value
+  if (!info || info.balance > 0) {
+    return 'normal'
+  }
+  return info.pendingReserveCount > 0 ? 'pending' : 'empty'
+})
+
+async function loadWallet() {
+  try {
+    const res = await walletApi.getWallet()
+    wallet.value = res.data
+  } catch {
+    // 余额是锦上添花：拿不到就不显示，不影响聊天
+    wallet.value = null
+  }
+}
+
+function goWallet() {
+  visible.value = false
+  router.push('/me/wallet')
+}
+
 async function toggle() {
   if (!visible.value) {
     visible.value = true
@@ -1796,6 +1840,8 @@ async function toggle() {
       guestUsedCount.value = loadGuestUsedCount()
     } else {
       await loadSessions()
+      // 不 await：余额只是展示，不该拖慢面板打开
+      loadWallet()
       // 刚点过"创建会话"（pendingNewSession）→ 保持欢迎页；否则自动接回最近会话
       if (!pendingNewSession && sortedSessions.value.length > 0) {
         switchSession(sortedSessions.value[0].id)
@@ -2535,6 +2581,18 @@ watch(visible, async (v) => {
         <div class="ai-panel-title">
           <span class="ai-panel-emoji">🤖</span>
           <span>海林BlogAI助手</span>
+          <!-- 余额入口：点击跳钱包页。三态配色与个人中心的余额卡一致 -->
+          <button
+            v-if="!isGuest && wallet"
+            type="button"
+            class="ai-balance-chip"
+            :class="`is-${walletTone}`"
+            :title="walletTone === 'empty' ? '额度不足，点击充值' : '查看我的钱包'"
+            @mousedown.stop
+            @click="goWallet"
+          >
+            {{ wallet.balance }}
+          </button>
         </div>
         <div class="ai-panel-actions">
           <n-button size="tiny" quaternary @click="createSession">
@@ -3783,6 +3841,37 @@ watch(visible, async (v) => {
 
 .ai-panel-emoji {
   font-size: 22px;
+}
+
+/* 余额 chip：三态配色与 WalletBalanceCard / WalletView 保持一致 */
+.ai-balance-chip {
+  padding: 0 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.ai-balance-chip:hover {
+  background: #f1f5f9;
+}
+
+/* 预占中：余额是负的但不必充值，中性偏暖色，不做成告警 */
+.ai-balance-chip.is-pending {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #b45309;
+}
+
+/* 结算后仍为负：这才需要充值 */
+.ai-balance-chip.is-empty {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #dc2626;
 }
 
 .ai-panel-actions {

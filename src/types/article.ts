@@ -16,6 +16,8 @@ export interface Article {
   shareCount?: number
   liked?: number
   favorited?: number
+  /** 今日独立访客。注意与 viewCount 语义不同：viewCount 是累计浏览量，这个只统计当天 */
+  uvCount?: number
   publishedAt: string
   createdAt: string
   updatedAt: string
