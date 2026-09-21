@@ -29,6 +29,21 @@ export interface WalletPackage {
   creditAmount: number
 }
 
+/**
+ * 自定义充值的配置（来自后端 blog.wallet.custom）。
+ *
+ * ⚠️ `minYuan` / `maxYuan` 的单位是**元**，不是分——和后端字段名一样带 Yuan。
+ * 前端不硬编码这两个数：改了后端配置前端不同步的话，用户按提示填了却被后端拒。
+ */
+export interface WalletCustomConfig {
+  /** 单笔下限（元，整数） */
+  minYuan: number
+  /** 单笔上限（元，整数） */
+  maxYuan: number
+  /** 1 元 = 多少 credit */
+  creditPerYuan: number
+}
+
 export type RechargeOrderStatus = 'PENDING' | 'PAID' | 'CANCELLED'
 
 export interface RechargeOrder {

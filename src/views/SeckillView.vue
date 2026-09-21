@@ -22,6 +22,23 @@ const POLL_INTERVAL_MS = 1000
 const MAX_POLL_ATTEMPTS = 10
 const pollTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
+/** 边界到达后再等一拍，给后端的流转任务留出翻转状态的时间 */
+const REFRESH_MARGIN_MS = 1000
+/** 「startAt 已过、后端却还是 DRAFT」时的重试节奏——专门用来吃掉任务那 0~5 秒的延迟 */
+const STALE_DRAFT_RETRY_MS = 3000
+/** 下限，避免边界就在眼前时打出一串请求 */
+const MIN_REFRESH_MS = 1000
+/**
+ * 一个活动都没有（或全都排到了很久以后）时的兜底重拉间隔。
+ *
+ * 取 30 秒而不是几分钟：列表每天有一段几十秒的空窗——10:30 那一刻今天的场次被
+ * `end_at > now` 过滤掉，而明天的要等每日任务跑下一轮才建出来。用户正好在那时打开的话，
+ * 干等 5 分钟才看到卡片太久了。空列表时请求很轻（0 个活动 = 1 次查询），勤一点无所谓。
+ */
+const IDLE_REFRESH_MS = 30 * 1000
+
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
+
 async function loadActivities() {
   loading.value = true
   try {
@@ -31,7 +48,46 @@ async function loadActivities() {
     message.error(e instanceof Error ? e.message : '活动加载失败')
   } finally {
     loading.value = false
+    scheduleRefresh()
   }
+}
+
+/**
+ * 在最近的时间边界之后重新拉一次列表。
+ *
+ * 这个页面原先只在挂载时加载一次——用户停在页面上，活动开始了、结束了，界面都不会变。
+ * 但**本地绝不自己判断「开始了」**（后端的状态由定时任务翻转，最长晚 5 秒，
+ * 本地抢跑会造出「前端说能抢、后端说没开始」的窗口）。所以这里只做一件事：
+ * 到点了去问服务端要新状态。
+ */
+function scheduleRefresh() {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer)
+    refreshTimer = null
+  }
+
+  const now = Date.now()
+  const waits: number[] = []
+  for (const activity of activities.value) {
+    const start = new Date(activity.startAt).getTime()
+    const end = new Date(activity.endAt).getTime()
+    if (activity.status === 'DRAFT') {
+      // 还没到点 → 等到点再拉；已经到点却还没翻转 → 短节奏重试，那 0~5 秒的延迟由这里吃掉
+      waits.push(start > now ? start - now + REFRESH_MARGIN_MS : STALE_DRAFT_RETRY_MS)
+    } else if (activity.status === 'ACTIVE' && end > now) {
+      waits.push(end - now + REFRESH_MARGIN_MS)
+    }
+  }
+
+  if (waits.length === 0) {
+    // ⚠️ 没有这一兜，这一页会就此冻死：列表空 ⇒ 排不出任何边界 ⇒ 永远不再拉取，
+    // 用户挂着页面等开场，什么都不会发生。
+    // （正常也不该走到这里——服务端会始终保留一张「下一场」的卡；
+    //  但当天活动被抢完 + 下一场还没建出来的窗口、或者后端任务挂了，都会落到这）
+    refreshTimer = setTimeout(loadActivities, IDLE_REFRESH_MS)
+    return
+  }
+  refreshTimer = setTimeout(loadActivities, Math.max(MIN_REFRESH_MS, Math.min(...waits)))
 }
 
 /**
@@ -115,19 +171,49 @@ function applyStatus(activityId: string, status: SeckillStatus) {
   }
 }
 
+/** 活动相位（整场活动的状态，区别于 myStatus 那个人的参与状态） */
+type ActivityPhase = 'draft' | 'active' | 'ended'
+
+/**
+ * 相位派生。
+ *
+ * ⚠️ **本地时钟只允许把状态推向「更不可抢」**：一个 ACTIVE 的活动过了 `endAt` 就显示已结束。
+ * 方向是保守的——最坏早显示几秒，绝不会出现「前端说能抢、后端说没开始」。
+ * **`startAt` 永远不参与判断**，那一条只能等后端的 `status` 翻转解锁。
+ */
+function activityPhase(activity: SeckillActivity): ActivityPhase {
+  if (activity.status === 'ENDED' || activity.remainingStock <= 0) {
+    return 'ended'
+  }
+  if (activity.status === 'DRAFT') {
+    return 'draft'
+  }
+  return Date.now() >= new Date(activity.endAt).getTime() ? 'ended' : 'active'
+}
+
 function buttonLabel(activity: SeckillActivity): string {
+  // 个人结果优先：已经到账、正在入账、发放异常的人，不该因为活动结束而看到「已结束」
   switch (activity.myStatus) {
     case 'GRANTED':
       return '已到账'
     case 'QUEUED':
       return '排队中…'
-    case 'FAILED':
-      return '未抢到'
     case 'FAILED_RETRY':
       return '发放异常'
+    case 'FAILED':
+      return '未抢到'
     default:
-      return activity.remainingStock > 0 ? '立即抢' : '已抢完'
+      break
   }
+
+  const phase = activityPhase(activity)
+  if (phase === 'draft') {
+    return '未开始'
+  }
+  if (phase === 'ended') {
+    return activity.remainingStock > 0 ? '已结束' : '已抢完'
+  }
+  return '立即抢'
 }
 
 function isBusy(activity: SeckillActivity): boolean {
@@ -135,7 +221,8 @@ function isBusy(activity: SeckillActivity): boolean {
     grabbing.value === activity.id ||
     activity.myStatus === 'QUEUED' ||
     activity.myStatus === 'GRANTED' ||
-    activity.remainingStock <= 0
+    // 未开始 / 已结束都不该点得动——原先是「点了才被后端拒」
+    activityPhase(activity) !== 'active'
   )
 }
 
@@ -152,6 +239,9 @@ onMounted(loadActivities)
 onUnmounted(() => {
   pollTimers.forEach((timer) => clearTimeout(timer))
   pollTimers.clear()
+  if (refreshTimer) {
+    clearTimeout(refreshTimer)
+  }
 })
 </script>
 
@@ -176,7 +266,7 @@ onUnmounted(() => {
       <EmptyState
         v-else-if="activities.length === 0"
         title="暂无可参与的活动"
-        description="有新的额度秒杀时会出现在这里"
+        description="每天定时开场，名额有限、先到先得——稍后刷新看看"
       />
 
       <ul v-else class="seckill-list">
@@ -184,7 +274,7 @@ onUnmounted(() => {
           v-for="activity in activities"
           :key="activity.id"
           class="seckill-card"
-          :class="`is-${activity.myStatus.toLowerCase()}`"
+          :class="[`is-${activity.myStatus.toLowerCase()}`, `phase-${activityPhase(activity)}`]"
         >
           <div class="seckill-card-main">
             <h2 class="seckill-name">{{ activity.name }}</h2>
@@ -284,6 +374,15 @@ onUnmounted(() => {
   border: 1px solid #eef0f2;
   border-radius: 12px;
   background: #fff;
+}
+
+/* 未开始 / 已结束：中性灰。
+   刻意不抢「排队中」的暖黄与「已到账」的绿——那两色表达的是个人结果，
+   而这两色表达的是「这场活动现在跟你能做的事无关」。 */
+.seckill-card.phase-draft,
+.seckill-card.phase-ended {
+  border-color: #e2e8f0;
+  background: #f8fafc;
 }
 
 /* 排队中：暖黄，和钱包的「预占中」三态保持一致——它是进行中，不是告警 */

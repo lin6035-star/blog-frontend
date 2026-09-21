@@ -6,7 +6,14 @@ import { ArrowBack } from '@vicons/ionicons5'
 import MainLayout from '@/layouts/MainLayout.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { walletApi } from '@/api/wallet'
-import type { WalletBillEntry, WalletInfo, WalletPackage } from '@/types/wallet'
+import type { Result } from '@/types/result'
+import type {
+  RechargeOrder,
+  WalletBillEntry,
+  WalletCustomConfig,
+  WalletInfo,
+  WalletPackage,
+} from '@/types/wallet'
 import { formatArticleDateTime, formatCredit, formatPayAmount } from '@/utils/format'
 
 const router = useRouter()
@@ -18,6 +25,27 @@ const packages = ref<WalletPackage[]>([])
 const billEntries = ref<WalletBillEntry[]>([])
 const loading = ref(false)
 const paying = ref(false)
+
+/** 配置接口没回来时的占位值——真正的边界在后端，这里只负责输入框不至于空着 */
+const DEFAULT_CUSTOM_CONFIG: WalletCustomConfig = { minYuan: 1, maxYuan: 1000, creditPerYuan: 1000 }
+const customConfig = ref<WalletCustomConfig>(DEFAULT_CUSTOM_CONFIG)
+/** 配置是否成功取到。失败就不渲染自定义入口——它是个附加功能，不该拖累套餐和余额 */
+const customEnabled = ref(false)
+
+/**
+ * ⚠️ 必须是 `number | null`：{@code n-input-number} 清空时给的是 **null**，
+ * 不是 0 也不是 NaN。用 `!customYuan` 之类的假值判断会把 0 和 null 混成一类。
+ */
+const customYuan = ref<number | null>(null)
+
+/** 本地估算的到账额度，仅用于确认框和预览；真正的额度由后端在下单时算 */
+const customCredit = computed(() => {
+  const yuan = customYuan.value
+  if (yuan === null || !Number.isFinite(yuan)) {
+    return 0
+  }
+  return yuan * customConfig.value.creditPerYuan
+})
 
 /** 业务类型 → 中文。后端返回的已经是聚合后的业务类型，不是流水类型 */
 const typeLabel: Record<string, string> = {
@@ -67,34 +95,97 @@ async function loadAll() {
   } finally {
     loading.value = false
   }
+
+  // 单独发、单独 catch：这是后加的接口，让它 reject 掉上面那个 Promise.all，
+  // 等于把「自定义充值没取到配置」升级成「钱包页整个打不开」——用户会连余额都看不见
+  try {
+    const res = await walletApi.getCustomConfig()
+    customConfig.value = res.data ?? DEFAULT_CUSTOM_CONFIG
+    customEnabled.value = true
+  } catch {
+    customEnabled.value = false
+  }
 }
 
 /**
- * 选套餐 → 模拟支付。
+ * 下单 + 支付：套餐与自定义金额共用。
  *
  * 下单和支付分两步（对应后端两个接口），是为了和将来接真实支付时的流程一致：
  * 那时「下单」和「支付回调」之间会隔着一次真实的第三方支付。
+ *
+ * 两条路的后半段完全一样，分开写早晚会在「忘了 loadAll」「忘了复位 paying」这类地方漂移。
  */
+async function runRecharge(
+  createOrder: () => Promise<Result<RechargeOrder>>,
+  successText: string,
+) {
+  paying.value = true
+  try {
+    const order = await createOrder()
+    await walletApi.payRechargeOrder(order.data.orderNo)
+    message.success(successText)
+    await loadAll()
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '充值失败')
+  } finally {
+    paying.value = false
+  }
+}
+
+/** 选套餐 → 模拟支付 */
 function choosePackage(pkg: WalletPackage) {
+  // ⚠️ 在开对话框**之前**拦：paying 只在 onPositiveClick 里置位，
+  // 第一个确认框还没点确认时再点一次，会叠开第二个对话框、最终生成两张订单、两次到账。
+  // 订单状态 CAS 防不了这个——它只能防「同一张订单付两次」
+  if (paying.value) {
+    return
+  }
   dialog.warning({
     title: '模拟支付',
     content: `确认支付 ${formatPayAmount(pkg.payAmount)} 购买 ${formatCredit(pkg.creditAmount)} 额度吗？`
       + '这是虚拟支付，不会真的扣款。',
     positiveText: '确认支付',
     negativeText: '取消',
-    onPositiveClick: async () => {
-      paying.value = true
-      try {
-        const order = await walletApi.createRechargeOrder(pkg.code)
-        await walletApi.payRechargeOrder(order.data.orderNo)
-        message.success(`充值成功，到账 ${formatCredit(pkg.creditAmount)} 额度`)
-        await loadAll()
-      } catch (e) {
-        message.error(e instanceof Error ? e.message : '充值失败')
-      } finally {
-        paying.value = false
-      }
-    },
+    onPositiveClick: () =>
+      runRecharge(
+        () => walletApi.createRechargeOrder(pkg.code),
+        `充值成功，到账 ${formatCredit(pkg.creditAmount)} 额度`,
+      ),
+  })
+}
+
+/** 自定义金额 → 模拟支付 */
+function chooseCustomAmount() {
+  if (paying.value) {
+    return
+  }
+
+  const yuan = customYuan.value
+  if (yuan === null || !Number.isFinite(yuan)) {
+    message.warning('请输入充值金额')
+    return
+  }
+  if (yuan < customConfig.value.minYuan || yuan > customConfig.value.maxYuan) {
+    message.warning(
+      `充值金额需在 ${customConfig.value.minYuan} ~ ${customConfig.value.maxYuan} 元之间`,
+    )
+    return
+  }
+
+  // ⚠️ 显示的是**元**，所以绝不能走 formatPayAmount——那个函数吃「分」，
+  // formatPayAmount(5) 会显示成 ¥0.05，而 5 元和 5 分看起来都"对"，
+  // 要等付完钱才会发现。整数元直接用原值，不做任何换算
+  const credit = yuan * customConfig.value.creditPerYuan
+  dialog.warning({
+    title: '模拟支付',
+    content: `确认支付 ¥${yuan} 购买 ${formatCredit(credit)} 额度吗？这是虚拟支付，不会真的扣款。`,
+    positiveText: '确认支付',
+    negativeText: '取消',
+    onPositiveClick: () =>
+      runRecharge(
+        () => walletApi.createCustomRechargeOrder(yuan),
+        `充值成功，到账 ${formatCredit(credit)} 额度`,
+      ),
   })
 }
 
@@ -151,6 +242,38 @@ onMounted(loadAll)
           </button>
         </div>
         <p class="wallet-packages-note">虚拟支付，点击后不会真的扣款</p>
+      </section>
+
+      <section v-if="customEnabled" class="wallet-section">
+        <h2 class="wallet-section-title">自定义金额</h2>
+        <div class="wallet-custom">
+          <n-input-number
+            v-model:value="customYuan"
+            class="wallet-custom-input"
+            :min="customConfig.minYuan"
+            :max="customConfig.maxYuan"
+            :precision="0"
+            :show-button="false"
+            :disabled="paying"
+            :placeholder="`${customConfig.minYuan} ~ ${customConfig.maxYuan}`"
+            @keyup.enter="chooseCustomAmount"
+          />
+          <span class="wallet-custom-unit">元</span>
+          <button
+            type="button"
+            class="wallet-custom-submit"
+            :disabled="paying"
+            @click="chooseCustomAmount"
+          >
+            立即充值
+          </button>
+        </div>
+        <p class="wallet-packages-note">
+          只能填整数元，1 元 = {{ formatCredit(customConfig.creditPerYuan) }} 额度。套餐更划算。
+          <template v-if="customCredit > 0">
+            本次到账 {{ formatCredit(customCredit) }} 额度。
+          </template>
+        </p>
       </section>
 
       <section class="wallet-section">
@@ -362,6 +485,43 @@ onMounted(loadAll)
   margin: 10px 0 0;
   color: #94a3b8;
   font-size: 12px;
+}
+
+.wallet-custom {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.wallet-custom-input {
+  width: 180px;
+}
+
+.wallet-custom-unit {
+  color: #64748b;
+  font-size: 14px;
+}
+
+.wallet-custom-submit {
+  padding: 9px 20px;
+  border: 1px solid #6366f1;
+  border-radius: 10px;
+  background: #6366f1;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.wallet-custom-submit:hover:not(:disabled) {
+  background: #4f46e5;
+  border-color: #4f46e5;
+}
+
+.wallet-custom-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .wallet-loading {
