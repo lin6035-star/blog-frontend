@@ -111,9 +111,10 @@ export interface AgentWriteProposal {
    * ADD_LEARNING_TASK=追加学习任务（done 忽略）；
    * UPDATE_LEARNING_TASK=重命名学习任务（taskTitle=旧名 + newTitle=新名，done 忽略）；
    * UPDATE_ARTICLE_TITLE=改自己文章标题（V3.4，articleId/articleTitle 为文章域锚，taskTitle/planRef/stageTitle 为 null，done 恒 false）；
-   * HIDE_ARTICLE / PUBLISH_ARTICLE=隐藏/公开自己文章（V3.7，前置状态由动作推导，articleId + articleTitle 展示用）
+   * HIDE_ARTICLE / PUBLISH_ARTICLE=隐藏/公开自己文章（V3.7，前置状态由动作推导，articleId + articleTitle 展示用）；
+   * RECHARGE_WALLET=给钱包充值（2026-09-21，payYuan 为金额，其余字段为 null）
    */
-  actionType: 'UPDATE_TASK_DONE' | 'ADD_LEARNING_TASK' | 'UPDATE_LEARNING_TASK' | 'UPDATE_ARTICLE_TITLE' | 'HIDE_ARTICLE' | 'PUBLISH_ARTICLE'
+  actionType: 'UPDATE_TASK_DONE' | 'ADD_LEARNING_TASK' | 'UPDATE_LEARNING_TASK' | 'UPDATE_ARTICLE_TITLE' | 'HIDE_ARTICLE' | 'PUBLISH_ARTICLE' | 'RECHARGE_WALLET'
   planRef?: string
   stageTitle?: string
   taskTitle?: string
@@ -122,6 +123,13 @@ export interface AgentWriteProposal {
   /** V3.4 文章域：目标文章 ID（页面上下文锚）与提案时刻 DB 权威旧标题（并发防护锚） */
   articleId?: string
   articleTitle?: string
+  /**
+   * 钱包域：充值金额（**元**，整数串）。
+   *
+   * ⚠️ 单位是「元」不是「分」——项目里 `payAmount` 一律是分，别混。
+   * 到账额度**不在这里**：它是兑换比例派生的，由后端执行时算，卡片上只做估算。
+   */
+  payYuan?: string
 }
 
 /** Agent 思考步骤（V2.3 / V3.10）：status = RUNNING / SUCCESS / FAILED / SKIPPED */
@@ -237,6 +245,16 @@ export interface ArticleAction {
     | 'scrollToTop'
   articleId?: string
   content?: string
+}
+
+/** 后端文章交互批次的单项权威结果。前端只消费并刷新，不据此再次发起写请求。 */
+export interface ArticleInteractionResult {
+  actionType: 'LIKE_ARTICLE' | 'UNLIKE_ARTICLE' | 'FAVORITE_ARTICLE' | 'UNFAVORITE_ARTICLE' | 'FOLLOW_AUTHOR' | 'UNFOLLOW_AUTHOR'
+  outcome: 'SUCCESS' | 'FAILED'
+  resultCode: 'APPLIED' | 'ALREADY_SATISFIED' | 'TARGET_NOT_FOUND' | 'FORBIDDEN' | 'CONFLICT' | 'INTERNAL_ERROR'
+  summary: string
+  before?: boolean | null
+  after?: boolean | null
 }
 
 // ============================================================
@@ -475,6 +493,7 @@ export interface StreamCallbacks {
     workflow?: AiWorkflowRun,
     workflowSuggestion?: WorkflowSuggestion,
     writeAction?: AgentWriteProposal,
+    actionResults?: ArticleInteractionResult[],
   ) => void
   onError: (error: Error) => void
   /** 用户主动停止生成，前端自行处理（保留已输出内容） */
@@ -710,6 +729,7 @@ async function streamChat(
               workflow?: AiWorkflowRun
               workflowSuggestion?: WorkflowSuggestion
               writeAction?: AgentWriteProposal
+              actionResults?: ArticleInteractionResult[]
             }
 
             const assistantMessage = {
@@ -727,6 +747,7 @@ async function streamChat(
               data.workflow,
               data.workflowSuggestion,
               data.writeAction,
+              data.actionResults,
             )
           }
         } catch {

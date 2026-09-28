@@ -24,6 +24,8 @@ import { useLoginGuard } from '@/composables/useLoginGuard'
 import CommentSection from '@/components/comment/CommentSection.vue'
 import MainLayout from '@/layouts/MainLayout.vue'
 import { registerAiArticleActionHandler, unregisterAiArticleActionHandler } from '@/utils/aiArticleActionBus'
+import { registerAiArticleResultHandler, unregisterAiArticleResultHandler } from '@/utils/aiArticleResultBus'
+import type { AiArticleResultPayload } from '@/utils/aiArticleResultBus'
 import type { Article } from '@/types/article'
 import type { PublicUserInfo } from '@/types/publicUser'
 import { formatArticleDateTime } from '@/utils/format'
@@ -198,75 +200,15 @@ async function handleAiArticleAction(action: ArticleAction) {
     await copyCurrentArticleLink()
     return
   }
+}
 
-  if (action.type === 'followAuthor') {
-    if (!authorProfile.value) {
-      message.warning('作者信息还没加载完成')
-      return
-    }
-    if (authorProfile.value.self) {
-      message.warning('不能关注自己')
-      return
-    }
-    if (authorProfile.value.followed) {
-      message.info('你已经关注过这个作者了')
-      return
-    }
-    await handleAuthorFollow()
-    return
-  }
+async function handleAiArticleResults(payload: AiArticleResultPayload) {
+  if (!article.value) return
+  if (String(article.value.id) !== String(payload.articleId)) return
+  if (!payload.results.length) return
 
-  if (action.type === 'unfollowAuthor') {
-    if (!authorProfile.value) {
-      message.warning('作者信息还没加载完成')
-      return
-    }
-    if (authorProfile.value.self) {
-      message.warning('不能取消关注自己')
-      return
-    }
-    if (!authorProfile.value.followed) {
-      message.info('你还没有关注这个作者')
-      return
-    }
-    await handleAuthorFollow()
-    return
-  }
-
-  if (action.type === 'likeArticle') {
-    if (liked.value) {
-      message.info('你已经点赞过这篇文章了')
-      return
-    }
-    await handleLike()
-    return
-  }
-
-  if (action.type === 'unlikeArticle') {
-    if (!liked.value) {
-      message.info('你还没有点赞这篇文章')
-      return
-    }
-    await handleLike()
-    return
-  }
-
-  if (action.type === 'favoriteArticle') {
-    if (favorited.value) {
-      message.info('你已经收藏过这篇文章了')
-      return
-    }
-    await handleFavorite()
-    return
-  }
-
-  if (action.type === 'unfavoriteArticle') {
-    if (!favorited.value) {
-      message.info('你还没有收藏这篇文章')
-      return
-    }
-    await handleFavorite()
-  }
+  // 写操作已由后端批次执行；这里仅重新读取文章和作者的权威状态，禁止二次写入。
+  await loadArticle()
 }
 
 async function handleFavorite() {
@@ -355,6 +297,7 @@ onMounted(() => {
   window.addEventListener('scroll', updateDetailBackBarStuck, { passive: true })
   window.addEventListener('resize', updateDetailBackBarStuck)
   registerAiArticleActionHandler(handleAiArticleAction)
+  registerAiArticleResultHandler(handleAiArticleResults)
 })
 
 // 详情页之间跳转（如点击 AI 引用片段）复用同一组件，onMounted 不会触发，
@@ -375,6 +318,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('scroll', updateDetailBackBarStuck)
   window.removeEventListener('resize', updateDetailBackBarStuck)
   unregisterAiArticleActionHandler(handleAiArticleAction)
+  unregisterAiArticleResultHandler(handleAiArticleResults)
 })
 </script>
 

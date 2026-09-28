@@ -45,6 +45,7 @@ import type {
 } from '@/api/ai'
 import { emitAiEditorAction } from '@/utils/aiEditorBus'
 import { emitAiArticleAction } from '@/utils/aiArticleActionBus'
+import { emitAiArticleResults } from '@/utils/aiArticleResultBus'
 import { renderMarkdown } from '@/utils/markdown'
 
 import { useAuthStore } from '@/stores/auth'
@@ -1688,13 +1689,29 @@ async function hydrateSuggestionMessages() {
 // V3.3：重命名任务（UPDATE_LEARNING_TASK）——done 也恒 false，同样不能靠 done 判断
 // V3.4：改文章标题（UPDATE_ARTICLE_TITLE）——文章域动作，done 恒 false、taskTitle 为 null
 // V3.7：隐藏/公开文章（HIDE_ARTICLE / PUBLISH_ARTICLE）——方向即动作，无 newTitle
+// 2026-09-21：充值（RECHARGE_WALLET）——钱包域，只有 payYuan
 function writeActionTypeLabel(w: AgentWriteProposal): string {
   if (w.actionType === 'ADD_LEARNING_TASK') return '追加学习任务'
   if (w.actionType === 'UPDATE_LEARNING_TASK') return '重命名学习任务'
   if (w.actionType === 'UPDATE_ARTICLE_TITLE') return '修改文章标题'
   if (w.actionType === 'HIDE_ARTICLE') return '隐藏文章'
   if (w.actionType === 'PUBLISH_ARTICLE') return '公开文章'
+  if (w.actionType === 'RECHARGE_WALLET') return '充值确认'
   return w.done ? '勾选任务为完成' : '取消任务完成状态'
+}
+
+/**
+ * 充值卡的按钮文案。
+ *
+ * ⚠️ 它必须是**专属**的。默认的「继续」和所有其他写动作一模一样——
+ * 而这张卡点下去动的是钱。金额要显式念出来，用户扫一眼就知道对不对
+ * （这也是分类器万一误判时唯一的兜底：弹出「充值 1000 元」比弹出「继续」显眼得多）。
+ */
+function writeActionConfirmText(w: AgentWriteProposal): string {
+  if (w.actionType === 'RECHARGE_WALLET') {
+    return w.payYuan ? `确认充值 ¥${w.payYuan}` : '确认充值'
+  }
+  return '继续'
 }
 function writeActionReason(w: AgentWriteProposal): string {
   if (w.actionType === 'ADD_LEARNING_TASK') {
@@ -1719,6 +1736,12 @@ function writeActionReason(w: AgentWriteProposal): string {
     // V3.7：文章《X》将被公开
     return `将文章《${w.articleTitle ?? '—'}》公开，恢复为所有人可见`
   }
+  if (w.actionType === 'RECHARGE_WALLET') {
+    // 2026-09-21 钱包域：显式念出金额。
+    // 到账额度**不在这里算**——它是兑换比例派生的，权威数字由后端在执行结果里给（前端会 toast）。
+    // 卡片上写死一个数，而配置改过的话就变成了谎话
+    return `给钱包充值 ${w.payYuan ?? '—'} 元，确认后立即到账`
+  }
   return `任务「${w.taskTitle}」` + (w.stageTitle ? `（阶段：${w.stageTitle}）` : '')
 }
 
@@ -1737,7 +1760,12 @@ async function confirmWriteAction(msg: AiMessage) {
       }
     }
   } catch (e: any) {
-    setWriteActionState(msg, 'pending')
+    // 「已被处理或已过期」是终态：提案已经没得点了，再置回 pending 只会让用户
+    // 反复点一张永远不会成功的卡。'expired' 这个状态一直定义了却从没人设置过，
+    // 而它正好描述的就是这种情况（同会话起了新 run 时旧卡会被后端批量作废）
+    const alreadyGone = typeof e?.message === 'string'
+      && (e.message.includes('已被处理') || e.message.includes('已过期'))
+    setWriteActionState(msg, alreadyGone ? 'expired' : 'pending')
     message.error(e?.message ?? '执行失败，请重试')
   }
 }
@@ -2261,6 +2289,9 @@ async function send(text?: string, skipUserMessage = false) {
   const aiPlaceholderIndex = messages.value.length
   messages.value.push(aiPlaceholder)
 
+  // 后端结果按请求发生时的文章上下文归属，不能等 STOP 时再读取当前路由。
+  const requestPageContext = buildPageContext()
+
   // V3.10：新一轮流式开启自动模式——若出现 Agent 思考步骤则自动展开，
   // 正文开始输出后自动收起（见 onAgentStep / onData）
   thinkingAutoMode.value = true
@@ -2268,7 +2299,7 @@ async function send(text?: string, skipUserMessage = false) {
   aiApi.streamChat(
     isGuest.value ? null : currentSessionId.value,
     content,
-    buildPageContext(),
+    requestPageContext,
     {
       onParam(_session, userMessage) {
         if (!uiAttached()) return
@@ -2331,8 +2362,15 @@ async function send(text?: string, skipUserMessage = false) {
         if (thinkingAutoMode.value) thinkingStepsExpanded.value = true
         await scrollToBottom()
       },
-      async onStop(session, assistantMessage, navigate, editorAction, articleAction, references, workflow, workflowSuggestion, writeAction) {
+      async onStop(session, assistantMessage, navigate, editorAction, articleAction, references, workflow, workflowSuggestion, writeAction, actionResults) {
         endStream(streamKey)
+
+        if (requestPageContext.articleId && actionResults?.length) {
+          emitAiArticleResults({
+            articleId: requestPageContext.articleId,
+            results: actionResults,
+          })
+        }
 
         // 用户已切走：这份 messages 已经属于别的会话，UI 一律不动
         // （尤其不能把 currentSessionId 设成这个流所属的会话，那会把用户强行拉回去）；
@@ -3087,7 +3125,7 @@ watch(visible, async (v) => {
                       :disabled="msg.writeActionState === 'processing'"
                       @click="confirmWriteAction(msg)"
                     >
-                      继续
+                      {{ writeActionConfirmText(msg.writeAction) }}
                     </n-button>
                     <n-button
                       size="small"

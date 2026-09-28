@@ -13,6 +13,19 @@ interface CreateRequestOptions {
   onUnauthorized?: () => void
 }
 
+let unauthorizedHandler: (() => void) | undefined
+
+/**
+ * 注册未授权处理器（token 失效的统一出口）。
+ *
+ * 由 router 在初始化时注入，而不是在这里直接 import store / router：
+ * utils 反向依赖会形成循环依赖，且模块顶层执行时 pinia 还没装上。
+ * createRequest 显式传入的 onUnauthorized 优先于它。
+ */
+export function setUnauthorizedHandler(handler: () => void) {
+  unauthorizedHandler = handler
+}
+
 type AxiosMethods = 'get' | 'post' | 'put' | 'patch' | 'delete'
 const TOKEN_KEY = 'blog_token'
 const USER_KEY = 'blog_user'
@@ -66,6 +79,9 @@ export function createRequest(options: CreateRequestOptions = {}): ResultRequest
     adapter: options.adapter,
   })
 
+  // 未授权统一出口：显式注入优先，否则用全局注册的（见 setUnauthorizedHandler）
+  const handleUnauthorized = options.onUnauthorized ?? (() => unauthorizedHandler?.())
+
   instance.interceptors.request.use((config: InternalAxiosRequestConfig) => {
     const token = options.getToken ? options.getToken() : readLocalAuthToken()
 
@@ -82,7 +98,7 @@ export function createRequest(options: CreateRequestOptions = {}): ResultRequest
 
       if (typeof result?.code === 'number' && result.code !== 0) {
         if (result.code === 40100) {
-          options.onUnauthorized?.()
+          handleUnauthorized()
         }
 
         return Promise.reject(new Error(result.message || '请求失败'))
@@ -90,7 +106,15 @@ export function createRequest(options: CreateRequestOptions = {}): ResultRequest
 
       return result as unknown as AxiosResponse
     },
-    (error) => Promise.reject(error),
+    (error) => {
+      // 鉴权拦截器返回的是 HTTP 401（body 里同样带 40100），不经过上面的业务码分支——
+      // token 过期时这条才是主路径，漏了它前端就完全无感
+      if (error?.response?.status === 401) {
+        handleUnauthorized()
+      }
+
+      return Promise.reject(error)
+    },
   )
 
   return instance as ResultRequest

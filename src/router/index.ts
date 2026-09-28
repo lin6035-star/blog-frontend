@@ -17,6 +17,7 @@ import LearningPlanDetailView from '@/views/LearningPlanDetailView.vue'
 import DevAgentRunsView from '@/views/DevAgentRunsView.vue'
 import DevAgentRunDetailView from '@/views/DevAgentRunDetailView.vue'
 import { useAuthStore } from '@/stores/auth'
+import { setUnauthorizedHandler } from '@/utils/request'
 
 const { message } = createDiscreteApi(['message'])
 
@@ -139,10 +140,42 @@ const router = createRouter({
   ],
 })
 
+/*
+ * 未授权统一出口：token 失效（业务码 40100 / HTTP 401）时清登录态、提示、跳登录页。
+ *
+ * 注册在这里而不是 request.ts——utils 不能反向依赖 store / router（循环依赖，
+ * 且模块顶层执行时 pinia 还没装上），而本文件已有 message 实例和 router。
+ *
+ * 在此之前，40100 的处理回调是个从未被注册的孤儿：token 过期后请求静默失败，
+ * Pinia 里的用户名/头像原样留着，界面看起来"还登录着"，用户完全无感。
+ */
+let redirectingToLogin = false
+
+setUnauthorizedHandler(() => {
+  useAuthStore().clearAuth()
+
+  const current = router.currentRoute.value
+  // 已经在登录页（例如登录接口自身报未登录）不重复提示；
+  // 并发请求同时 401 时，只由第一个触发跳转和提示
+  if (current.path === '/login' || redirectingToLogin) {
+    return
+  }
+
+  redirectingToLogin = true
+  message.warning('登录已过期，请重新登录')
+  router
+    .push({ path: '/login', query: { redirect: current.fullPath } })
+    .finally(() => {
+      redirectingToLogin = false
+    })
+})
+
 router.beforeEach((to) => {
   if (to.meta.requiresAuth && !useAuthStore().isLoggedIn) {
     message.warning('请先登录后再操作亲')
-    return false
+    // 跳登录页而不是 return false：后者会中止导航，
+    // 直接刷新受保护页面（如 token 过期后刷新 /me）会停在空白页
+    return { path: '/login', query: { redirect: to.fullPath } }
   }
 
   return true
