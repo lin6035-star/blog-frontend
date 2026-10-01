@@ -38,6 +38,8 @@ import type {
   AgentStepView,
   AgentStepEvent,
   AgentPlanEvent,
+  TaskPlanEvent,
+  TaskStepEvent,
   ChatStatusEvent,
   AgentStepHistoryItem,
   AgentWriteProposal,
@@ -1137,6 +1139,111 @@ function applyAgentStepEvent(event: AgentStepEvent, messageIndex: number) {
 }
 
 /**
+ * 第三刀：任务计划实时落到当前 AI 消息。
+ *
+ * 计划到达时所有步骤都是 PENDING——先在界面上把"要做哪几件事"列出来，
+ * 用户不必等结果回来才知道 AI 打算做什么。
+ */
+function applyTaskPlanEvent(event: TaskPlanEvent, messageIndex: number) {
+  const current = messages.value[messageIndex]
+  if (!current || current.role !== 'ai') return
+
+  const steps: TaskStepEvent[] = event.steps.map((s) => ({
+    stepId: s.stepId,
+    type: s.type,
+    state: 'PENDING',
+    code: '',
+    summary: '',
+  }))
+  messages.value[messageIndex] = { ...current, taskSteps: steps }
+}
+
+/** 第三刀：任务步骤实时 upsert（按 stepId，同一步骤状态会从 RUNNING 更新到终态） */
+function applyTaskStepEvent(event: TaskStepEvent, messageIndex: number) {
+  const current = messages.value[messageIndex]
+  if (!current || current.role !== 'ai') return
+
+  const steps = [...(current.taskSteps ?? [])]
+  const idx = steps.findIndex((s) => s.stepId === event.stepId)
+  if (idx >= 0) steps[idx] = event
+  else steps.push(event)
+
+  messages.value[messageIndex] = { ...current, taskSteps: steps }
+}
+
+/**
+ * 第四步：把子 run 的内部步骤挂到对应任务步骤下（按 taskStepId）。
+ *
+ * 与 applyAgentStepEvent 的分工：那条记进 message.thinkingSteps（整条消息的过程），
+ * 这条记进某个 taskSteps[].innerSteps（那一行的展开明细）——两个层级不能混。
+ */
+function applyInnerAgentStepEvent(event: AgentStepEvent, messageIndex: number) {
+  const current = messages.value[messageIndex]
+  if (!current || current.role !== 'ai' || !event.taskStepId) return
+
+  const taskSteps = [...(current.taskSteps ?? [])]
+  const idx = taskSteps.findIndex((s) => s.stepId === event.taskStepId)
+  if (idx < 0) return
+
+  const inner = [...(taskSteps[idx].innerSteps ?? [])]
+  const step: AgentStepView = {
+    stepNo: event.stepNo,
+    actionType: event.actionType,
+    status: event.status,
+    message: event.message,
+    thoughtSummary: event.thoughtSummary ?? null,
+  }
+  const existing = inner.findIndex((s) => s.stepNo === event.stepNo)
+  if (existing >= 0) inner[existing] = step
+  else inner.push(step)
+  inner.sort((a, b) => a.stepNo - b.stepNo)
+
+  taskSteps[idx] = { ...taskSteps[idx], innerSteps: inner }
+  messages.value[messageIndex] = { ...current, taskSteps }
+}
+
+/** 第三刀：步骤状态图标。DISPATCHED 用"已发出"的语义，不用成功勾——后端不知道前端跳没跳成 */
+function taskStateIcon(state: string): string {
+  switch (state) {
+    case 'SUCCEEDED':
+      return '✅'
+    case 'DISPATCHED':
+      return '📤'
+    case 'FAILED':
+      return '❌'
+    case 'SKIPPED':
+      return '⏭️'
+    case 'WAITING_CONFIRM':
+    case 'WAITING_USER':
+      return '⏸️'
+    case 'RUNNING':
+      return '⏳'
+    default:
+      return '•'
+  }
+}
+
+/** 第三刀：步骤类型的中文标签（尚未执行时 summary 为空，用它兜底显示） */
+function taskTypeLabel(type: string): string {
+  switch (type) {
+    case 'ARTICLE_WRITE':
+      return '文章操作'
+    case 'ARTICLE_SEARCH':
+      return '搜索文章'
+    case 'NAVIGATE':
+      return '页面跳转'
+    case 'ARTICLE_QUERY':
+      return '读取文章'
+    case 'ARTICLE_ANALYSIS':
+      return '分析文章'
+    case 'WORKFLOW_HANDOFF':
+      return '启动流程'
+    default:
+      return type
+  }
+}
+
+/**
  * V3.13：计划事件按**占位消息索引**归并。
  *
  * 本事件早于 STOP——那时最终消息尚未落库，占位消息还没有 agentRunId，
@@ -1213,12 +1320,65 @@ async function hydrateThinkingSteps() {
   // 计划恢复失败不能让 steps 被视为不存在，steps 恢复失败也不能覆盖已恢复的 plan
   const stepResults = await Promise.allSettled(ids.map((id) => aiApi.getAgentRunSteps(id)))
   const detailResults = await Promise.allSettled(ids.map((id) => aiApi.getAgentRunDetail(id)))
+
+  /*
+   * 第四步：子 run 的内部明细**不在外层 run 的 steps 里**——它属于子 run 自己。
+   * 所以先按任务步骤透出的 childRunId 去重收集，再一次性并发补拉，
+   * 最后在下面的同步映射里查表挂载（不在 forEach 里 await，避免打乱与 ids 的对应关系）。
+   * 补拉失败只影响那一行的展开明细，不影响任务步骤本身的恢复。
+   */
+  const childRunIds = Array.from(new Set(
+    stepResults.flatMap((r) =>
+      r.status === 'fulfilled'
+        ? ((r.value?.data ?? []) as AgentStepHistoryItem[]).map((s) => s.childRunId)
+        : [],
+    ).filter((id): id is string => !!id),
+  ))
+  const childStepResults = await Promise.allSettled(
+    childRunIds.map((id) => aiApi.getAgentRunSteps(id)),
+  )
+  const innerByChildRun = new Map<string, AgentStepView[]>()
+  childRunIds.forEach((childId, i) => {
+    const res = childStepResults[i]
+    if (res.status !== 'fulfilled') return
+    const items = (res.value?.data ?? []) as AgentStepHistoryItem[]
+    innerByChildRun.set(childId, items
+      .map((s) => ({
+        stepNo: s.stepNo,
+        actionType: s.actionType,
+        status: s.status as AgentStepView['status'],
+        message: s.message ?? s.summary ?? s.actionType,
+        thoughtSummary: s.thoughtSummary ?? null,
+      }))
+      .sort((a, b) => a.stepNo - b.stepNo))
+  })
+
   ids.forEach((id, i) => {
     const steps = stepResults[i].status === 'fulfilled' ? stepResults[i].value?.data : null
     const plan = detailResults[i].status === 'fulfilled'
       ? detailResults[i].value?.data?.plan
       : null
     if (!steps?.length && !plan?.length) return
+
+    // 第三刀：按 kind 分流——任务步骤不是思考步骤。
+    // 两层同表，若不区分，任务步骤会被当成思考步骤渲染，而它没有思考文案
+    // （AgentStepLabelSupport 不认识 TASK_STEP，会返回默认占位），
+    // 表现就是"刷新后思考过程变了样"。
+    const allSteps = (steps ?? []) as AgentStepHistoryItem[]
+    const taskSteps: TaskStepEvent[] = allSteps
+      .filter((s) => s.kind === 'TASK')
+      .map((s) => ({
+        stepId: `step-${s.stepNo}`,
+        type: '',
+        // 历史接口把 DISPATCHED 归一成了 SUCCESS，这里只能还原到这一层
+        state: s.status === 'SUCCESS' ? 'SUCCEEDED' : s.status,
+        code: '',
+        summary: s.summary ?? s.message ?? '',
+        // 第四步：任务步骤下的内部明细（子 run），补拉失败时为 undefined
+        innerSteps: s.childRunId ? innerByChildRun.get(s.childRunId) : undefined,
+      }))
+    const agentSteps = allSteps.filter((s) => s.kind !== 'TASK')
+
     const idx = messages.value.findIndex(
       (msg) => msg.agentRunId === id && (!msg.thinkingSteps || !msg.plan),
     )
@@ -1226,8 +1386,8 @@ async function hydrateThinkingSteps() {
     const prev = messages.value[idx]
     messages.value[idx] = {
       ...prev,
-      thinkingSteps: prev.thinkingSteps ?? (steps?.length
-        ? steps
+      thinkingSteps: prev.thinkingSteps ?? (agentSteps.length
+        ? agentSteps
             .map((s: AgentStepHistoryItem) => ({
               stepNo: s.stepNo,
               actionType: s.actionType,
@@ -1237,6 +1397,7 @@ async function hydrateThinkingSteps() {
             }))
             .sort((a, b) => a.stepNo - b.stepNo)
         : undefined),
+      taskSteps: prev.taskSteps ?? (taskSteps.length ? taskSteps : undefined),
       plan: prev.plan ?? (plan?.length ? plan : undefined),
     }
   })
@@ -2355,8 +2516,49 @@ async function send(text?: string, skipUserMessage = false) {
         // V4.5：聊天 / QA 过程状态（可能早于 PARAM 到达——不依赖消息 ID）
         onChatStatusEvent(event)
       },
+      async onTaskPlan(event) {
+        if (!uiAttached()) return
+        // 第三刀：外层任务计划——先把"要做哪几件事"渲染出来，而不是等结果回来才知道
+        applyTaskPlanEvent(event, aiPlaceholderIndex)
+      },
+      async onTaskStep(event) {
+        if (!uiAttached()) return
+        // 第三刀：外层任务步骤——每步结束推一次，状态如实（DISPATCHED 不说"已完成"）
+        applyTaskStepEvent(event, aiPlaceholderIndex)
+
+        // 任务链路的真实副作用结果不再等 STOP 的旧 actionResults 字段：
+        // 写动作已由后端执行，这里只刷新权威状态，不重复发起写请求。
+        const output = event.output ?? {}
+        const interactionResult = output.interactionResult
+        if (event.type === 'ARTICLE_WRITE'
+          && interactionResult
+          && requestPageContext.articleId) {
+          emitAiArticleResults({
+            articleId: requestPageContext.articleId,
+            results: [interactionResult as any],
+          })
+        }
+
+        // 导航步骤的执行端是前端。后端只返回 DISPATCHED + 结构化命令，
+        // 这里才真正调用路由，不从自然语言 summary 里猜目标。
+        if (event.type === 'NAVIGATE'
+          && event.state === 'DISPATCHED'
+          && typeof output.target === 'string') {
+          const param = typeof output.param === 'string'
+            ? output.param
+            : typeof output.userId === 'string' ? output.userId : undefined
+          await handleNavigate({ target: output.target, param })
+        }
+      },
       async onAgentStep(event) {
         if (!uiAttached()) return
+        // 第四步：带 taskStepId 的是子 run 的内部步骤——挂到对应任务步骤下展开，
+        // 不进整条消息的思考面板（TASK_STEP 与 AGENT_STEP 是两个层级，不能混）
+        if (event.taskStepId) {
+          applyInnerAgentStepEvent(event, aiPlaceholderIndex)
+          await scrollToBottom()
+          return
+        }
         applyAgentStepEvent(event, aiPlaceholderIndex)
         // V3.10：思考期间自动展开面板（用户未手动干预时）
         if (thinkingAutoMode.value) thinkingStepsExpanded.value = true
@@ -2422,6 +2624,7 @@ async function send(text?: string, skipUserMessage = false) {
             // 否则实时计划只显示到正文落库前，刷新前后会不一致
             thinkingSteps: messages.value[idx].thinkingSteps,
             plan: messages.value[idx].plan,
+            taskSteps: messages.value[idx].taskSteps,
             // V4.x：过程步骤同理——流式期间累积在 liveChatSteps（事件可能早于消息创建，挂不上消息），
             // 这里落到消息上，完成后仍可展开回看
             processSteps: [
@@ -3000,6 +3203,47 @@ watch(visible, async (v) => {
                         {{ liveIdx === liveChatSteps.length - 1 ? '⌛' : '✓' }}
                       </span>
                       <span class="ai-process__text">{{ step }}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!--
+                  第三刀：任务步骤（外层任务层）。
+                  用户要的这几件事，每件的结果如实显示——DISPATCHED 说"已发起"而不是"已完成"。
+                  与外层的"思考过程"是两个层级，所以放在它外面、消息正文之下。
+                -->
+                <div
+                  v-if="msg.role === 'ai' && msg.taskSteps?.length"
+                  class="ai-task"
+                >
+                  <div class="ai-task__title">这次要做的事</div>
+                  <div
+                    v-for="task in msg.taskSteps"
+                    :key="task.stepId"
+                    class="ai-task__item"
+                  >
+                    <div class="ai-task__row">
+                      <span class="ai-task__icon">{{ taskStateIcon(task.state) }}</span>
+                      <span class="ai-task__text">
+                        {{ task.summary || taskTypeLabel(task.type) }}
+                      </span>
+                    </div>
+
+                    <!--
+                      第四步：该任务步骤的**内部明细**（子 run 的 ReAct 步骤）。
+                      它是这一行的展开，不是整条消息的过程，所以不并进下面的"思考过程"面板。
+                    -->
+                    <div v-if="task.innerSteps?.length" class="ai-task__inner">
+                      <div
+                        v-for="inner in task.innerSteps"
+                        :key="inner.stepNo"
+                        class="ai-task__inner-item"
+                      >
+                        <span class="ai-task__inner-no">{{ inner.stepNo }}</span>
+                        <span class="ai-task__inner-text">
+                          {{ inner.thoughtSummary?.trim() || inner.message }}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -5284,6 +5528,64 @@ watch(visible, async (v) => {
    ============================================================ */
 
 /* Agent 思考过程（V2.3）：折叠条 + 步骤列表，与建议卡同风格 */
+/* 第三刀：任务步骤（外层任务层）——与"思考过程"是两个层级，视觉上也要分开 */
+.ai-task {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(128, 128, 128, 0.08);
+  font-size: 13px;
+}
+
+.ai-task__title {
+  font-weight: 500;
+  margin-bottom: 4px;
+  opacity: 0.75;
+}
+
+.ai-task__item {
+  padding: 2px 0;
+  line-height: 1.6;
+}
+
+/* 第四步：一行任务 + 它自己的内部明细（子 run 的 ReAct 步骤） */
+.ai-task__row {
+  display: flex;
+  gap: 6px;
+}
+
+.ai-task__inner {
+  margin: 2px 0 4px 22px;
+  padding-left: 8px;
+  border-left: 2px solid #e5e7eb;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.ai-task__inner-item {
+  display: flex;
+  gap: 6px;
+  line-height: 1.5;
+}
+
+.ai-task__inner-no {
+  flex: none;
+  min-width: 14px;
+  opacity: 0.6;
+}
+
+.ai-task__inner-text {
+  word-break: break-word;
+}
+
+.ai-task__icon {
+  flex: none;
+}
+
+.ai-task__text {
+  word-break: break-word;
+}
+
 .ai-thinking {
   width: 100%;
   box-sizing: border-box;

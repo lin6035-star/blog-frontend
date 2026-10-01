@@ -87,6 +87,14 @@ export interface AiMessage {
   /** V3.13：Plan Preview 计划（实时 AGENT_PLAN 事件归并 / run 详情补拉挂回，run 级） */
   plan?: string[]
   /**
+   * 第三刀：任务步骤（外层任务层）。
+   *
+   * 与 thinkingSteps 分属两个层级——这里是"用户要的这件事完成得怎么样"，
+   * thinkingSteps 是"为做成它 AI 内部查了什么"。混在一起用户会分不清哪些是他要的、
+   * 哪些是过程。
+   */
+  taskSteps?: TaskStepEvent[]
+  /**
    * V4.x：过程步骤（过程状态 + 工作流步骤合并到一条链）。
    * 流式结束后由前端从 liveChatSteps 落到消息上，供展开回看——展示"AI 这一轮都做了什么"。
    */
@@ -155,6 +163,20 @@ export interface AgentStepHistoryItem {
   errorMessage?: string | null
   durationMs?: number | null
   createdAt?: string
+  /**
+   * 第三刀：步骤层级（AGENT=思考步骤 / TASK=外层任务步骤）。
+   *
+   * 两层都落在同一张 step 表，历史恢复时靠它分流——否则任务步骤会被当成思考步骤渲染，
+   * 而它没有思考文案，会显示成默认占位（刷新后看起来像"变成了别的东西"）。
+   */
+  kind?: string | null
+  /**
+   * 第四步：该任务步骤由**子 run** 承接时给出子 run id（否则 null）。
+   *
+   * 刷新恢复靠它二次补拉内部明细——子 run 的步骤属于子 run 自己，
+   * 不在外层 run 的 steps 列表里。
+   */
+  childRunId?: string | null
 }
 
 /** V3.13：后端 AgentRunDetailVO（run 级；plan 仅文章域可能非空） */
@@ -198,6 +220,9 @@ export interface AgentStepRawItem {
   outputJson?: string | null
   thoughtSummary?: string | null
   createdAt?: string
+  /** P0-b：本步决策（decide / repair）的 LLM token 用量；只读动作执行本身不调 LLM */
+  inputTokens?: number | null
+  outputTokens?: number | null
 }
 
 /** V4 第一刀：后端 AgentRunDevDetailVO（安全摘要 + 未清洗 contextJson） */
@@ -205,6 +230,14 @@ export interface AgentRunDevDetail {
   run: AgentRunDetail
   /** 原始 observations 序列化（含文章正文片段等模型可见材料，未清洗） */
   contextJson?: string | null
+  /**
+   * P0-b：run 级 Token（本 run 直接发起的 LLM 调用）。
+   * 放在外层而非 `run` 里——`run` 与用户侧接口同源，不承载内部成本。
+   * P0 没有子 run，totalTokens 即子树总量；P1 接入父子 run 后补 local / subtree 派生值。
+   */
+  inputTokens?: number | null
+  outputTokens?: number | null
+  totalTokens?: number | null
 }
 
 /** Agent 建议的 Workflow（V2.1）：确认后才由后端启动，Agent 无法直接启动 */
@@ -481,6 +514,10 @@ export interface StreamCallbacks {
   onAgentStep?: (event: AgentStepEvent) => Promise<void> | void
   /** V3.13：Agent 计划事件（run 级，恒在首个 AGENT_STEP 之前到达） */
   onAgentPlan?: (event: AgentPlanEvent) => Promise<void> | void
+  /** 第三刀：任务计划（外层，先于任何 onTaskStep 到达） */
+  onTaskPlan?: (event: TaskPlanEvent) => Promise<void> | void
+  /** 第三刀：任务步骤（外层，每步结束推一次） */
+  onTaskStep?: (event: TaskStepEvent) => Promise<void> | void
   /** V4.5：聊天 / QA 过程状态（可能早于 PARAM 到达——按占位消息索引归并，不依赖消息 ID） */
   onChatStatus?: (event: ChatStatusEvent) => Promise<void> | void
   onStop: (
@@ -517,6 +554,41 @@ export interface AgentPlanEvent {
 }
 
 /** Agent 思考步骤事件（V2.3，SSE 实时推送；V3.10 加 thoughtSummary） */
+/**
+ * 第三刀：任务计划事件（外层任务层）。
+ *
+ * 与 AGENT_PLAN（文章 Agent 的自然语言计划预览）不是一回事——这里列的是
+ * 「用户要完成哪几件事」，每项对应一个可执行步骤。
+ */
+export interface TaskPlanEvent {
+  goal: string
+  steps: Array<{ stepId: string; type: string }>
+}
+
+/**
+ * 第三刀：任务步骤事件（外层任务层）。
+ *
+ * 与 AGENT_STEP 分属两个层级：TASK_STEP 是「用户要的这件事」，
+ * AGENT_STEP 是「为做成它，Agent 内部做了哪些查询和判断」。
+ * 前端把任务步骤当外层、思考过程当子层展示。
+ */
+export interface TaskStepEvent {
+  stepId: string
+  type: string
+  state: string
+  code: string
+  summary: string
+  /** 执行器的结构化结果：写动作结果或客户端命令等，不由文案反推 */
+  output?: Record<string, any>
+  /**
+   * 第四步：该任务步骤的**内部明细**（子 run 的思考步骤）。
+   *
+   * 两条来源：实时 AGENT_STEP 事件（带 taskStepId）、刷新后按 childRunId 补拉。
+   * 与 message.thinkingSteps 是两个层级——它是某一行的展开，不是整条消息的过程。
+   */
+  innerSteps?: AgentStepView[]
+}
+
 export interface AgentStepEvent {
   stepNo: number
   actionType: string
@@ -524,6 +596,13 @@ export interface AgentStepEvent {
   message: string
   /** V3.10：思考摘要（清洗后，可空——行文本优先于 message，防空串用 trim 兜底） */
   thoughtSummary?: string | null
+  /**
+   * 第四步：该步骤属于哪个**外层任务步骤**（只有子 run 的内部事件才带）。
+   *
+   * 带了 = 它是某个任务步骤的展开明细，应挂到对应 taskSteps[].innerSteps；
+   * 没带 = 普通 Agent 循环步骤，照旧进 message.thinkingSteps。
+   */
+  taskStepId?: string | null
 }
 
 /**
@@ -634,6 +713,8 @@ const EVENT_WORKFLOW_CONTENT_DELTA = 2004
 const EVENT_AGENT_STEP = 3001
 const EVENT_AGENT_PLAN = 3002
 const EVENT_CHAT_STATUS = 4001
+const EVENT_TASK_PLAN = 5001
+const EVENT_TASK_STEP = 5002
 
 async function streamChat(
   sessionId: string | null,
@@ -715,6 +796,10 @@ async function streamChat(
             await callbacks.onAgentStep?.(event.eventData as AgentStepEvent)
           } else if (event.eventType === EVENT_AGENT_PLAN) {
             await callbacks.onAgentPlan?.(event.eventData as AgentPlanEvent)
+          } else if (event.eventType === EVENT_TASK_PLAN) {
+            await callbacks.onTaskPlan?.(event.eventData as TaskPlanEvent)
+          } else if (event.eventType === EVENT_TASK_STEP) {
+            await callbacks.onTaskStep?.(event.eventData as TaskStepEvent)
           } else if (event.eventType === EVENT_CHAT_STATUS) {
             await callbacks.onChatStatus?.(event.eventData as ChatStatusEvent)
           } else if (event.eventType === EVENT_STOP) {

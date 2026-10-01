@@ -23,6 +23,8 @@ const denied = ref<string | null>(null)
 const run = ref<AgentRunDetail | null>(null)
 const contextJson = ref<string | null>(null)
 const steps = ref<AgentStepRawItem[]>([])
+/** P0-b：run 级 Token——在开发者详情的外层字段里，不在 run 摘要内（用户侧同源摘要不承载内部成本） */
+const runTokens = ref({ input: 0, output: 0, total: 0 })
 
 async function loadDetail() {
   loading.value = true
@@ -35,11 +37,17 @@ async function loadDetail() {
     run.value = detailRes.data.run
     contextJson.value = detailRes.data.contextJson ?? null
     steps.value = stepsRes.data ?? []
+    runTokens.value = {
+      input: detailRes.data.inputTokens ?? 0,
+      output: detailRes.data.outputTokens ?? 0,
+      total: detailRes.data.totalTokens ?? 0,
+    }
   } catch (e) {
     denied.value = e instanceof Error ? e.message : '加载失败'
     run.value = null
     contextJson.value = null
     steps.value = []
+    runTokens.value = { input: 0, output: 0, total: 0 }
   } finally {
     loading.value = false
   }
@@ -71,6 +79,16 @@ const duplicateStepNos = computed(() => {
 
   return duplicated
 })
+
+/**
+ * P0-b：单步决策 Token（输入 / 输出）。
+ *
+ * 输入量随步骤递增是**正常现象**——每步都会重发累计 observation；
+ * 它同时是 Token 工程后续几刀的基线读数（"哪一步最贵、重放占多少"）。
+ */
+function stepTokens(step: AgentStepRawItem): string {
+  return `${step.inputTokens ?? 0} / ${step.outputTokens ?? 0}`
+}
 
 /** 能解析就美化，不能就原样返回（原始列不保证是合法 JSON） */
 function pretty(raw?: string | null) {
@@ -113,6 +131,9 @@ onMounted(loadDetail)
               <n-descriptions-item label="Run ID">{{ run.id }}</n-descriptions-item>
               <n-descriptions-item label="状态">{{ run.status }}</n-descriptions-item>
               <n-descriptions-item label="目标" :span="2">{{ run.goal }}</n-descriptions-item>
+              <n-descriptions-item label="Token（入 / 出 / 合计）" :span="2">
+                {{ runTokens.input }} / {{ runTokens.output }} / {{ runTokens.total }}
+              </n-descriptions-item>
               <n-descriptions-item label="步数">
                 {{ run.usedSteps ?? 0 }} / {{ run.maxSteps ?? 0 }}
               </n-descriptions-item>
@@ -154,6 +175,9 @@ onMounted(loadDetail)
                 <span class="dev-step-action">{{ step.actionType }}</span>
                 <span class="dev-step-status">{{ step.status }}</span>
                 <span v-if="duplicateStepNos.has(step.stepNo)" class="dev-step-dup">观察重复</span>
+                <span class="dev-step-tokens" title="本步决策 Token（输入 / 输出）">
+                  tok {{ stepTokens(step) }}
+                </span>
                 <span class="dev-step-duration">{{ step.durationMs ?? 0 }}ms</span>
               </div>
 
@@ -349,6 +373,12 @@ onMounted(loadDetail)
 }
 
 .dev-step-status {
+  font-size: 12px;
+  color: #888;
+}
+
+.dev-step-tokens {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   color: #888;
 }
