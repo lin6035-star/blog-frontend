@@ -260,6 +260,9 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/** 编排回复是完成后批量切块到达，按一帧多一点的节奏展示，避免肉眼看成整段跳出。 */
+const TASK_REPLY_CHUNK_DELAY_MS = 24
+
 // 压缩轮询序号：连续回复时旧轮询让位，避免旧状态覆盖新状态
 let compressionCheckSeq = 0
 
@@ -1069,6 +1072,7 @@ async function cancelWorkflow() {
   setLocalTransition(workflowId, 'CANCELLING')
   try {
     await aiApi.cancelWorkflow(workflowId)
+    await refreshBoundTaskResult(workflowId)
     clearSessionActiveWorkflow(workflowId)
     // 只有面板上还是这个 workflow 时才清 —— 用户切走后 activeWorkflow
     // 已经是别的会话的了，不能连带清掉
@@ -1154,6 +1158,7 @@ function applyTaskPlanEvent(event: TaskPlanEvent, messageIndex: number) {
     state: 'PENDING',
     code: '',
     summary: '',
+    goalEvidence: s.goalEvidence ?? [],
   }))
   messages.value[messageIndex] = { ...current, taskSteps: steps }
 }
@@ -1165,7 +1170,13 @@ function applyTaskStepEvent(event: TaskStepEvent, messageIndex: number) {
 
   const steps = [...(current.taskSteps ?? [])]
   const idx = steps.findIndex((s) => s.stepId === event.stepId)
-  if (idx >= 0) steps[idx] = event
+  if (idx >= 0) {
+    steps[idx] = {
+      ...steps[idx],
+      ...event,
+      goalEvidence: event.goalEvidence ?? steps[idx].goalEvidence,
+    }
+  }
   else steps.push(event)
 
   messages.value[messageIndex] = { ...current, taskSteps: steps }
@@ -1243,6 +1254,12 @@ function taskTypeLabel(type: string): string {
   }
 }
 
+/** 任务清单始终显示原始目标；执行结果由消息正文承载，避免完成后重复整段正文。 */
+function taskResultText(task: TaskStepEvent): string {
+  const goal = (task.goalEvidence ?? []).map((item) => item.trim()).filter(Boolean).join('；')
+  return goal || taskTypeLabel(task.type)
+}
+
 /**
  * V3.13：计划事件按**占位消息索引**归并。
  *
@@ -1309,7 +1326,10 @@ async function hydrateThinkingSteps() {
           (msg) =>
             msg.role === 'ai' &&
             msg.agentRunId &&
-            (!msg.thinkingSteps || !msg.plan),
+            // 5b：taskSteps 也是这条消息的一块独立数据。原先只判思考步骤与计划，
+            // 于是"外层任务步骤没被实时接住"的消息不会在这里补回来——
+            // 表现就是任务列表少一行（handoff 那步），直到整页刷新才出现
+            (!msg.thinkingSteps || !msg.plan || !msg.taskSteps),
         )
         .map((msg) => msg.agentRunId as string),
     ),
@@ -1369,18 +1389,20 @@ async function hydrateThinkingSteps() {
       .filter((s) => s.kind === 'TASK')
       .map((s) => ({
         stepId: `step-${s.stepNo}`,
-        type: '',
+        type: s.type ?? '',
         // 历史接口把 DISPATCHED 归一成了 SUCCESS，这里只能还原到这一层
         state: s.status === 'SUCCESS' ? 'SUCCEEDED' : s.status,
         code: '',
         summary: s.summary ?? s.message ?? '',
+        goalEvidence: s.goalEvidence ?? [],
         // 第四步：任务步骤下的内部明细（子 run），补拉失败时为 undefined
         innerSteps: s.childRunId ? innerByChildRun.get(s.childRunId) : undefined,
       }))
     const agentSteps = allSteps.filter((s) => s.kind !== 'TASK')
 
     const idx = messages.value.findIndex(
-      (msg) => msg.agentRunId === id && (!msg.thinkingSteps || !msg.plan),
+      (msg) =>
+        msg.agentRunId === id && (!msg.thinkingSteps || !msg.plan || !msg.taskSteps),
     )
     if (idx < 0) return
     const prev = messages.value[idx]
@@ -1483,6 +1505,72 @@ function applyInitialWorkflowStepCard(
   }
 }
 
+/**
+ * 5b：Workflow 结束后同步它绑定的消息正文和外层任务步骤。
+ *
+ * 后端在 Workflow 终态时会**自动续跑**外层计划的剩余步骤（`TASK_STEP` 行的状态被改写），
+ * 前端不重新拉就会一直停在"等确认"。这里只做展示同步——恢复的正确性完全由后端保证，
+ * 刷新失败不影响续跑（用户下次刷新页面照样能看到正确状态）。
+ */
+async function refreshBoundTaskResult(workflowId: number | string) {
+  // 优先找挂了这张 Workflow 卡的消息；找不到就退到"最后一条带 agentRunId 的 AI 消息"
+  // ——handoff 是当前这一轮的请求，它就在末尾（消息落库后 workflow 字段可能已不在内存里）
+  let idx = messages.value.findIndex(
+    (msg) => msg.role === 'ai' && msg.workflow?.id === workflowId && msg.agentRunId,
+  )
+  if (idx < 0) {
+    for (let i = messages.value.length - 1; i >= 0; i -= 1) {
+      if (messages.value[i].role === 'ai' && messages.value[i].agentRunId) {
+        idx = i
+        break
+      }
+    }
+  }
+  if (idx < 0) return
+  const agentRunId = messages.value[idx].agentRunId as string
+  const sessionId = currentSessionId.value
+  try {
+    const [stepRes, messageRes] = await Promise.all([
+      aiApi.getAgentRunSteps(agentRunId),
+      sessionId ? aiApi.getMessages(sessionId) : Promise.resolve(null),
+    ])
+    const previousTaskSteps = messages.value[idx].taskSteps ?? []
+    const taskSteps: TaskStepEvent[] = ((stepRes.data ?? []) as AgentStepHistoryItem[])
+      .filter((s) => s.kind === 'TASK')
+      .map((s) => {
+        // stepId 沿用历史接口的合成规则，与 hydrateThinkingSteps 保持一致
+        const stepId = `step-${s.stepNo}`
+        return {
+          stepId,
+          type: s.type ?? '',
+          state: s.status === 'SUCCESS' ? 'SUCCEEDED' : s.status,
+          code: '',
+          summary: s.summary ?? s.message ?? '',
+          goalEvidence: s.goalEvidence ?? [],
+          // 终态同步只更新外层事实，不应清掉已经补拉出的子 run 展开明细。
+          innerSteps: previousTaskSteps.find((task) => task.stepId === stepId)?.innerSteps,
+        }
+      })
+
+    // 同步期间用户可能切换会话，不能再用旧索引覆盖新会话里的消息。
+    const latestIdx = messages.value.findIndex(
+      (msg) => msg.role === 'ai' && msg.agentRunId === agentRunId,
+    )
+    if (latestIdx < 0 || (sessionId && currentSessionId.value !== sessionId)) return
+
+    const persisted = messageRes?.data?.find(
+      (msg) => msg.role === 'ai' && msg.agentRunId === agentRunId,
+    )
+    messages.value[latestIdx] = {
+      ...messages.value[latestIdx],
+      content: persisted?.content ?? messages.value[latestIdx].content,
+      taskSteps: taskSteps.length ? taskSteps : undefined,
+    }
+  } catch {
+    // 展示同步失败不抛：后端已经恢复完了
+  }
+}
+
 /** 流式结束事件：更新 activeWorkflow / 步骤日志 / editorAction */
 async function applyWorkflowStreamResult(data: WorkflowStreamResult) {
   if (!data.workflow) return
@@ -1493,6 +1581,8 @@ async function applyWorkflowStreamResult(data: WorkflowStreamResult) {
     if (data.editorAction) {
       await handleEditorAction(data.editorAction)
     }
+    // 5b：Workflow 终态后外层任务会被后端续跑，重新拉一次任务步骤让界面跟上
+    await refreshBoundTaskResult(data.workflow.id)
     activeWorkflow.value = null
     clearSessionActiveWorkflow(data.workflow.id)
     return
@@ -1500,6 +1590,10 @@ async function applyWorkflowStreamResult(data: WorkflowStreamResult) {
 
   activeWorkflow.value = data.workflow
   syncWorkflowSnapshotMessage(data.workflow)
+  // 5b：这里也要补齐外层任务步骤。handoff 那一步的 TASK_STEP 要等 Workflow 初始链
+  // 跑完（几十秒）才发，中途还可能因为流状态变化丢掉；不补的话，用户看到 Workflow 卡
+  // 却看不到"优化"那一行任务步骤，只能手动刷新页面
+  void refreshBoundTaskResult(data.workflow.id)
   // 流式内容已落库到 snapshot，清理累积的 delta
   delete workflowStreamingContent.value[data.workflow.id]
   delete workflowStreamingOutline.value[data.workflow.id]
@@ -2144,6 +2238,44 @@ async function restoreActiveWorkflow(session?: AiSession | null) {
 }
 
 /**
+ * 按 runId 把**权威** Workflow 快照应用到面板与消息卡片（5b）。
+ *
+ * 为什么需要它：`restoreActiveWorkflow` 那条路只在「刷新 / 切会话」时走，id 来自会话绑定；
+ * 而 5b 的 handoff **走的是聊天流**——它没有独立 Workflow SSE 那条
+ * 「STOP 带完整快照 + 步骤日志」的路径，前端手上只有 `WORKFLOW_STEP` 事件里的几个字段：
+ * 状态恒为 RUNNING（于是卡片标题显示成"Workflow"而不是"等待确认优化方案"）、
+ * 步骤缺「第 N 步」序号、耗时 / token 也是空的。
+ * 表现就是「卡片在，但内容和刷新后不是一回事」。
+ *
+ * 只在**流结束时**调一次，不是每个步骤事件都拉：一次 handoff 有六到八个步骤，
+ * 逐个补拉会打出一串无用请求。
+ */
+async function applyWorkflowSnapshotById(workflowId?: string | number | null) {
+  if (!workflowId) return
+  try {
+    const res = await aiApi.getWorkflowRun(String(workflowId))
+    if (!res.data) return
+
+    // 已结束的 Workflow 不该留在活动面板（那里没有对应操作区），只挂回消息卡片
+    if (
+      res.data.status === 'COMPLETED' ||
+      res.data.status === 'CANCELLED' ||
+      res.data.status === 'FAILED'
+    ) {
+      activeWorkflow.value = null
+      attachWorkflowToLatestAiMessage(res.data)
+      return
+    }
+
+    activeWorkflow.value = res.data
+    attachWorkflowToLatestAiMessage(res.data)
+    await refreshWorkflowStepLogs(String(res.data.id))
+  } catch {
+    // 补拉失败不抛：实时那份还在，且正确性本来就由后端负责，用户刷新照样看得到权威版本
+  }
+}
+
+/**
  * 钱包余额（登录用户才拉）。
  *
  * 余额允许为负，但**负余额有两种含义**，只看数字会把「预扣进行中」误报成欠费：
@@ -2456,6 +2588,8 @@ async function send(text?: string, skipUserMessage = false) {
   // V3.10：新一轮流式开启自动模式——若出现 Agent 思考步骤则自动展开，
   // 正文开始输出后自动收起（见 onAgentStep / onData）
   thinkingAutoMode.value = true
+  // 普通聊天是真流式，不额外延迟；收到 TASK_PLAN 后才开启编排回复的显示节奏。
+  let taskReplyPacing = false
 
   aiApi.streamChat(
     isGuest.value ? null : currentSessionId.value,
@@ -2493,6 +2627,7 @@ async function send(text?: string, skipUserMessage = false) {
           }
         }
         await scrollToBottom()
+        if (taskReplyPacing) await sleep(TASK_REPLY_CHUNK_DELAY_MS)
       },
       async onWorkflowStep(event) {
         if (!uiAttached()) return
@@ -2518,6 +2653,7 @@ async function send(text?: string, skipUserMessage = false) {
       },
       async onTaskPlan(event) {
         if (!uiAttached()) return
+        taskReplyPacing = true
         // 第三刀：外层任务计划——先把"要做哪几件事"渲染出来，而不是等结果回来才知道
         applyTaskPlanEvent(event, aiPlaceholderIndex)
       },
@@ -2609,6 +2745,11 @@ async function send(text?: string, skipUserMessage = false) {
           activeWorkflow.value = workflow
         }
 
+        // 5b：这一轮跑的是 handoff 时，面板里的卡是先由 WORKFLOW_STEP 实时建起来的，
+        // 字段残缺（状态恒为 RUNNING → 标题只显示"Workflow"；步骤缺序号 / 耗时 / token）。
+        // 流结束时补一次权威快照，否则"卡片在，但和刷新后完全是两回事"
+        void applyWorkflowSnapshotById(activeWorkflow.value?.id)
+
         // 用后端返回的完整数据替换 AI 占位（保留实时累计的思考步骤 V2.3）
         let idx = -1
         for (let i = messages.value.length - 1; i >= 0; i--) {
@@ -2625,6 +2766,12 @@ async function send(text?: string, skipUserMessage = false) {
             thinkingSteps: messages.value[idx].thinkingSteps,
             plan: messages.value[idx].plan,
             taskSteps: messages.value[idx].taskSteps,
+            // 5b：占位消息上可能已经挂了 Workflow 卡（handoff 的 WORKFLOW_STEP 实时建的那张）。
+            // 后端返回的消息**不带这个字段**（消息表不存 workflow），上面 2652 行的兜底
+            // 又只看了 assistantMessage 自己，所以不在这里显式保留的话，
+            // 卡片会在流结束的瞬间整张消失——用户得刷新才回来
+            //（刷新走 restoreActiveWorkflow，靠会话绑定的 workflow 重新挂上）。
+            workflow: messages.value[idx].workflow ?? (assistantMessage as any).workflow,
             // V4.x：过程步骤同理——流式期间累积在 liveChatSteps（事件可能早于消息创建，挂不上消息），
             // 这里落到消息上，完成后仍可展开回看
             processSteps: [
@@ -3225,7 +3372,7 @@ watch(visible, async (v) => {
                     <div class="ai-task__row">
                       <span class="ai-task__icon">{{ taskStateIcon(task.state) }}</span>
                       <span class="ai-task__text">
-                        {{ task.summary || taskTypeLabel(task.type) }}
+                        {{ taskResultText(task) }}
                       </span>
                     </div>
 

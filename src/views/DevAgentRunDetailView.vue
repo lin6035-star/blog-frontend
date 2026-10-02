@@ -24,7 +24,7 @@ const run = ref<AgentRunDetail | null>(null)
 const contextJson = ref<string | null>(null)
 const steps = ref<AgentStepRawItem[]>([])
 /** P0-b：run 级 Token——在开发者详情的外层字段里，不在 run 摘要内（用户侧同源摘要不承载内部成本） */
-const runTokens = ref({ input: 0, output: 0, total: 0 })
+const runTokens = ref({ input: 0, output: 0, total: 0, local: 0, subtree: 0 })
 
 async function loadDetail() {
   loading.value = true
@@ -41,13 +41,15 @@ async function loadDetail() {
       input: detailRes.data.inputTokens ?? 0,
       output: detailRes.data.outputTokens ?? 0,
       total: detailRes.data.totalTokens ?? 0,
+      local: detailRes.data.localTokens ?? 0,
+      subtree: detailRes.data.subtreeTokens ?? 0,
     }
   } catch (e) {
     denied.value = e instanceof Error ? e.message : '加载失败'
     run.value = null
     contextJson.value = null
     steps.value = []
-    runTokens.value = { input: 0, output: 0, total: 0 }
+    runTokens.value = { input: 0, output: 0, total: 0, local: 0, subtree: 0 }
   } finally {
     loading.value = false
   }
@@ -133,6 +135,9 @@ onMounted(loadDetail)
               <n-descriptions-item label="目标" :span="2">{{ run.goal }}</n-descriptions-item>
               <n-descriptions-item label="Token（入 / 出 / 合计）" :span="2">
                 {{ runTokens.input }} / {{ runTokens.output }} / {{ runTokens.total }}
+              </n-descriptions-item>
+              <n-descriptions-item label="Token（本地 / 子树）" :span="2">
+                {{ runTokens.local }} / {{ runTokens.subtree }}
               </n-descriptions-item>
               <n-descriptions-item label="步数">
                 {{ run.usedSteps ?? 0 }} / {{ run.maxSteps ?? 0 }}

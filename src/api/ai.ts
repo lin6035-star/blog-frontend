@@ -177,6 +177,9 @@ export interface AgentStepHistoryItem {
    * 不在外层 run 的 steps 列表里。
    */
   childRunId?: string | null
+  /** TASK_STEP 的具体类型与用户原话目标；历史恢复时用于还原任务行语义。 */
+  type?: string | null
+  goalEvidence?: string[] | null
 }
 
 /** V3.13：后端 AgentRunDetailVO（run 级；plan 仅文章域可能非空） */
@@ -238,6 +241,10 @@ export interface AgentRunDevDetail {
   inputTokens?: number | null
   outputTokens?: number | null
   totalTokens?: number | null
+  /** 当前 run 自己直接消耗的 Token。 */
+  localTokens?: number | null
+  /** 当前 run 与直接子 run 的 Token 合计。 */
+  subtreeTokens?: number | null
 }
 
 /** Agent 建议的 Workflow（V2.1）：确认后才由后端启动，Agent 无法直接启动 */
@@ -562,7 +569,7 @@ export interface AgentPlanEvent {
  */
 export interface TaskPlanEvent {
   goal: string
-  steps: Array<{ stepId: string; type: string }>
+  steps: Array<{ stepId: string; type: string; goalEvidence?: string[] }>
 }
 
 /**
@@ -578,6 +585,8 @@ export interface TaskStepEvent {
   state: string
   code: string
   summary: string
+  /** 用户原话中的目标片段；失败时与结果一起显示，避免只剩通用错误文案。 */
+  goalEvidence?: string[]
   /** 执行器的结构化结果：写动作结果或客户端命令等，不由文案反推 */
   output?: Record<string, any>
   /**
@@ -769,6 +778,11 @@ async function streamChat(
       buffer = lines.pop() ?? ''
 
       for (const line of lines) {
+        // 编排回复可能整批到达浏览器后再按节奏展示；停止时必须丢弃尚未消费的缓冲事件。
+        if (signal?.aborted) {
+          callbacks.onAbort?.()
+          return
+        }
         const trimmed = line.trim()
         if (!trimmed.startsWith('data:')) continue
 
