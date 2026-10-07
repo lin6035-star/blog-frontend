@@ -49,6 +49,7 @@ import { emitAiEditorAction } from '@/utils/aiEditorBus'
 import { emitAiArticleAction } from '@/utils/aiArticleActionBus'
 import { emitAiArticleResults } from '@/utils/aiArticleResultBus'
 import { renderMarkdown } from '@/utils/markdown'
+import { completeLiveProcessSteps, finalizeFailedStreamMessage } from './streamMessageState'
 
 import { useAuthStore } from '@/stores/auth'
 import { walletApi } from '@/api/wallet'
@@ -2582,6 +2583,15 @@ async function send(text?: string, skipUserMessage = false) {
   const aiPlaceholderIndex = messages.value.length
   messages.value.push(aiPlaceholder)
 
+  // 分类器返回首个 SSE 事件前，先由前端给出本地等待反馈，避免数秒空白。
+  clearChatStatus()
+  liveChatSteps.value = []
+  onChatStatusEvent({
+    statusType: 'LOCAL_PENDING',
+    retrievalMode: 'LOCAL',
+    message: '正在理解需求',
+  })
+
   // 后端结果按请求发生时的文章上下文归属，不能等 STOP 时再读取当前路由。
   const requestPageContext = buildPageContext()
 
@@ -2612,6 +2622,14 @@ async function send(text?: string, skipUserMessage = false) {
         if (!uiAttached()) return
         // V4.5：正文到达 → 清掉过程状态（含最小显示时长保护）
         clearChatStatus()
+        const streamingMessage = messages.value[aiPlaceholderIndex]
+        if (streamingMessage && liveChatSteps.value.length) {
+          messages.value[aiPlaceholderIndex] = completeLiveProcessSteps(
+            streamingMessage,
+            liveChatSteps.value,
+          )
+          liveChatSteps.value = []
+        }
         // V3.10：正文开始输出 → 自动收起思考面板（本次流式后用户可手动再展开）；
         // 仅首个 chunk 生效（关闭自动模式后不再重复操作）
         if (thinkingAutoMode.value) {
@@ -2826,8 +2844,17 @@ async function send(text?: string, skipUserMessage = false) {
         if (!uiAttached()) return
         // V4.5：出错 → 清掉过程状态（占位气泡也要移除，不能残留「正在检索」）
         clearChatStatus()
-        // 移除空 AI 占位气泡
-        messages.value.pop()
+        const failedMessage = finalizeFailedStreamMessage(messages.value[aiPlaceholderIndex])
+        if (failedMessage) {
+          messages.value[aiPlaceholderIndex] = completeLiveProcessSteps(
+            failedMessage,
+            liveChatSteps.value,
+          )
+        } else if (messages.value[aiPlaceholderIndex]?.role === 'ai') {
+          // 尚未输出任何正文时才删除空占位，不能抹掉已经展示给用户的部分结果。
+          messages.value.splice(aiPlaceholderIndex, 1)
+        }
+        liveChatSteps.value = []
       },
       onAbort() {
         endStream(streamKey)
